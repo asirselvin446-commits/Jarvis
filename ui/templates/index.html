@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>J.A.R.V.I.S. Neural OS</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: {
+      extend: {
+        colors: {
+          "surface": "#131315",
+          "surface-container": "#201f21",
+          "surface-container-low": "#1c1b1d",
+          "surface-container-high": "#2a2a2c",
+          "surface-container-highest": "#353437",
+          "surface-bright": "#39393b",
+          "surface-dim": "#131315",
+          "surface-variant": "#353437",
+          "on-surface": "#e5e1e4",
+          "on-surface-variant": "#b9cacb",
+          "on-background": "#e5e1e4",
+          "background": "#131315",
+          "primary": "#e1fdff",
+          "primary-container": "#00f2ff",
+          "primary-fixed-dim": "#00dbe7",
+          "on-primary": "#00363a",
+          "on-primary-container": "#006a71",
+          "secondary": "#dcb8ff",
+          "secondary-container": "#7701d0",
+          "on-secondary": "#480081",
+          "outline": "#849495",
+          "outline-variant": "#3a494b",
+          "error": "#ffb4ab",
+          "error-container": "#93000a",
+          "on-error": "#690005",
+          "inverse-surface": "#e5e1e4",
+          "inverse-on-surface": "#313032",
+        },
+        fontFamily: {
+          "body": ["JetBrains Mono", "monospace"],
+          "headline": ["Space Grotesk", "sans-serif"],
+        },
+      },
+    },
+  }
+</script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background-color: #0e0e10;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* App Layout - fixed full-screen flex column */
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100%;
+    max-width: 900px;
+    margin: 0 auto;
+    position: relative;
+  }
+
+  /* Header */
+  #app-header { flex-shrink: 0; }
+
+  /* Waveform section */
+  #waveform-section { flex-shrink: 0; }
+
+  /* Chat log - this is the scrollable area */
+  #chat-log {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0; /* critical for flex overflow */
+  }
+
+  /* Bottom bar */
+  #bottom-bar { flex-shrink: 0; }
+
+  /* Scrollbar */
+  #chat-log::-webkit-scrollbar { width: 4px; }
+  #chat-log::-webkit-scrollbar-track { background: transparent; }
+  #chat-log::-webkit-scrollbar-thumb { background: rgba(0, 219, 231, 0.3); border-radius: 4px; }
+
+  /* Scanline effect */
+  .scanline {
+    width: 100%; height: 100px; z-index: 5;
+    background: linear-gradient(0deg, rgba(0,0,0,0) 0%, rgba(0,219,231,0.05) 50%, rgba(0,0,0,0) 100%);
+    opacity: 0.1; position: fixed; bottom: 100%;
+    animation: scanline 8s linear infinite; pointer-events: none;
+  }
+  @keyframes scanline { 0% { bottom: 100%; } 100% { bottom: -100px; } }
+
+  /* Grid overlay */
+  .grid-overlay {
+    background-image:
+      linear-gradient(rgba(0, 219, 231, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 219, 231, 0.03) 1px, transparent 1px);
+    background-size: 20px 20px;
+    position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  }
+
+  /* Glass panel */
+  .glass-panel {
+    background: rgba(20, 20, 25, 0.7);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(0, 219, 231, 0.15);
+  }
+
+  /* Arc reactor glow */
+  .arc-glow {
+    box-shadow: 0 0 40px rgba(0, 219, 231, 0.15), inset 0 0 20px rgba(0, 219, 231, 0.05);
+  }
+
+  /* Waveform bars */
+  .waveform-bar {
+    width: 3px;
+    border-radius: 2px;
+    animation: pulse-height 1.5s ease-in-out infinite;
+    transform-origin: center;
+  }
+  @keyframes pulse-height {
+    0%, 100% { height: 15%; opacity: 0.4; }
+    50% { height: 80%; opacity: 1; }
+  }
+
+  /* Waveform active state (when listening) */
+  .waveform-listening .waveform-bar {
+    animation: pulse-height-active 0.4s ease-in-out infinite;
+  }
+  @keyframes pulse-height-active {
+    0%, 100% { height: 20%; opacity: 0.6; }
+    50% { height: 95%; opacity: 1; }
+  }
+
+  /* LED indicator */
+  .led-active { background-color: #00dbe7; box-shadow: 0 0 8px #00dbe7; }
+  .led-error { background-color: #ffb4ab; box-shadow: 0 0 8px #ffb4ab; }
+  .led-listening { background-color: #dcb8ff; box-shadow: 0 0 8px #dcb8ff; animation: led-pulse 1s ease-in-out infinite; }
+  @keyframes led-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Mic button states */
+  .mic-btn { transition: all 0.3s ease; }
+  .mic-btn.listening {
+    background: rgba(220, 184, 255, 0.3) !important;
+    box-shadow: 0 0 20px rgba(220, 184, 255, 0.5);
+    animation: mic-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes mic-pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.1); }
+  }
+
+  /* Corner accents */
+  .corner-accent { position: absolute; width: 8px; height: 8px; border-color: #00dbe7; }
+  .top-left { top: -1px; left: -1px; border-top-width: 1px; border-left-width: 1px; }
+  .top-right { top: -1px; right: -1px; border-top-width: 1px; border-right-width: 1px; }
+  .bottom-left { bottom: -1px; left: -1px; border-bottom-width: 1px; border-left-width: 1px; }
+  .bottom-right { bottom: -1px; right: -1px; border-bottom-width: 1px; border-right-width: 1px; }
+
+  /* Message entry animation */
+  .msg-enter { animation: msg-slide-in 0.3s ease-out; }
+  @keyframes msg-slide-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+
+<body class="text-on-surface select-none">
+
+<!-- Background effects -->
+<div class="grid-overlay"></div>
+<div class="scanline"></div>
+
+<!-- Fixed corner accents -->
+<div class="fixed top-2 left-2 w-10 h-10 border-t border-l border-primary/20 pointer-events-none z-10"></div>
+<div class="fixed top-2 right-2 w-10 h-10 border-t border-r border-primary/20 pointer-events-none z-10"></div>
+<div class="fixed bottom-2 left-2 w-10 h-10 border-b border-l border-primary/20 pointer-events-none z-10"></div>
+<div class="fixed bottom-2 right-2 w-10 h-10 border-b border-r border-primary/20 pointer-events-none z-10"></div>
+
+<!-- ═══ APP LAYOUT ═══ -->
+<div id="app">
+
+  <!-- ── HEADER ── -->
+  <header id="app-header" class="bg-surface/70 backdrop-blur-xl border-b border-outline-variant/30 flex justify-between items-center px-4 h-14 shadow-[0_0_10px_rgba(0,219,231,0.1)] z-20">
+    <div class="flex items-center gap-3">
+      <span class="material-symbols-outlined text-primary-container" style="font-variation-settings: 'FILL' 1;">memory</span>
+      <h1 class="font-headline text-xl font-bold tracking-tight text-primary drop-shadow-[0_0_8px_rgba(0,219,231,0.4)]">J.A.R.V.I.S.</h1>
+    </div>
+    <div class="flex items-center gap-2">
+      <div id="status-led" class="w-2 h-2 rounded-full led-active"></div>
+      <span id="status-text" class="text-[10px] font-bold text-on-surface tracking-[0.15em] uppercase">ONLINE</span>
+    </div>
+  </header>
+
+  <!-- ── WAVEFORM SECTION ── -->
+  <section id="waveform-section" class="relative mx-4 mt-3 h-32 flex items-center justify-center glass-panel rounded-xl overflow-hidden arc-glow">
+    <div class="top-left corner-accent"></div>
+    <div class="top-right corner-accent"></div>
+    <div class="bottom-left corner-accent"></div>
+    <div class="bottom-right corner-accent"></div>
+    <div id="waveform-container" class="flex items-center justify-center gap-1 h-full w-full px-8">
+      <!-- Waveform bars generated by JS -->
+    </div>
+    <div class="absolute top-2 left-3 text-[9px] font-bold text-primary/50 tracking-[0.15em] uppercase">AUDIO_STREAM</div>
+    <div id="waveform-label" class="absolute bottom-2 right-3 text-[9px] font-bold text-secondary/50 tracking-[0.15em] uppercase">IDLE</div>
+  </section>
+
+  <!-- ── CHAT LOG (scrollable) ── -->
+  <div id="chat-log" class="mx-4 mt-3 mb-3 glass-panel rounded-xl p-4">
+    <div id="chat-messages" class="space-y-3">
+      <!-- Welcome message -->
+      <div class="msg-enter flex flex-col gap-1 border-l-2 border-primary-container/30 pl-3">
+        <span class="text-[10px] font-bold text-primary-container tracking-[0.15em] uppercase">System</span>
+        <p class="text-[13px] text-on-surface leading-relaxed">J.A.R.V.I.S. Neural OS initialized. All systems operational. Awaiting your command.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BOTTOM BAR ── -->
+  <div id="bottom-bar" class="px-4 pb-4 pt-1 space-y-2">
+    <!-- Input Row -->
+    <div class="flex items-center gap-2 h-11 glass-panel rounded-xl px-3">
+      <input id="command-input"
+             class="flex-1 bg-transparent border-none focus:outline-none focus:ring-0 text-[13px] text-primary placeholder:text-outline/40 font-body"
+             placeholder="Enter command..."
+             type="text"
+             autocomplete="off" />
+      <button id="send-btn" class="h-7 w-7 rounded-lg bg-primary-container flex items-center justify-center text-on-primary-container cursor-pointer hover:brightness-110 active:scale-90 transition-all flex-shrink-0">
+        <span class="material-symbols-outlined text-[18px]" style="font-variation-settings: 'FILL' 1;">send</span>
+      </button>
+    </div>
+
+    <!-- Action buttons row -->
+    <nav class="flex justify-around items-center">
+      <button id="btn-clear" class="flex flex-col items-center gap-0.5 text-outline hover:text-primary-fixed-dim active:scale-90 transition-all p-2 cursor-pointer">
+        <span class="material-symbols-outlined text-[22px]">delete_sweep</span>
+        <span class="text-[8px] font-bold tracking-[0.1em] uppercase">CLEAR</span>
+      </button>
+
+      <button id="btn-mic" class="mic-btn flex items-center justify-center bg-primary/15 text-primary rounded-full w-12 h-12 drop-shadow-[0_0_8px_rgba(0,219,231,0.4)] active:scale-90 transition-all cursor-pointer">
+        <span class="material-symbols-outlined text-[26px]" style="font-variation-settings: 'FILL' 1;">mic</span>
+      </button>
+
+      <button id="btn-info" class="flex flex-col items-center gap-0.5 text-outline hover:text-primary-fixed-dim active:scale-90 transition-all p-2 cursor-pointer">
+        <span class="material-symbols-outlined text-[22px]">query_stats</span>
+        <span class="text-[8px] font-bold tracking-[0.1em] uppercase">INFO</span>
+      </button>
+    </nav>
+  </div>
+
+</div><!-- end #app -->
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// J.A.R.V.I.S. Neural OS — Frontend Controller
+// ═══════════════════════════════════════════════════════════════
+
+const input = document.getElementById('command-input');
+const sendBtn = document.getElementById('send-btn');
+const micBtn = document.getElementById('btn-mic');
+const clearBtn = document.getElementById('btn-clear');
+const infoBtn = document.getElementById('btn-info');
+const chatMessages = document.getElementById('chat-messages');
+const chatLog = document.getElementById('chat-log');
+const waveformContainer = document.getElementById('waveform-container');
+const waveformLabel = document.getElementById('waveform-label');
+const statusLed = document.getElementById('status-led');
+const statusText = document.getElementById('status-text');
+
+// ── Generate waveform bars ──
+(function generateBars() {
+  const count = 30;
+  for (let i = 0; i < count; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'waveform-bar';
+    const isPrimary = i % 3 !== 0;
+    bar.style.background = isPrimary ? '#00f2ff' : '#dcb8ff';
+    bar.style.animationDelay = (i * 0.08) + 's';
+    waveformContainer.appendChild(bar);
+  }
+})();
+
+// ── Randomize waveform occasionally ──
+setInterval(() => {
+  const bars = document.querySelectorAll('.waveform-bar');
+  bars.forEach(bar => {
+    if (Math.random() > 0.6) {
+      bar.style.animationDuration = (0.8 + Math.random() * 2) + 's';
+    }
+  });
+}, 3000);
+
+// ── Scroll chat to bottom ──
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    chatLog.scrollTop = chatLog.scrollHeight;
+  });
+}
+
+// ── Add message to chat ──
+function addMessage(sender, text, type = 'system') {
+  const msg = document.createElement('div');
+  msg.className = 'msg-enter flex flex-col gap-1 border-l-2 pl-3';
+
+  let borderColor, labelColor;
+  switch(type) {
+    case 'user':
+      borderColor = 'border-secondary/30';
+      labelColor = 'text-secondary';
+      break;
+    case 'error':
+      borderColor = 'border-error/30';
+      labelColor = 'text-error';
+      break;
+    case 'loading':
+      borderColor = 'border-outline/20';
+      labelColor = 'text-outline';
+      msg.classList.add('animate-pulse');
+      break;
+    default:
+      borderColor = 'border-primary-container/30';
+      labelColor = 'text-primary-container';
+  }
+
+  msg.classList.add(borderColor);
+  msg.innerHTML = `
+    <span class="text-[10px] font-bold ${labelColor} tracking-[0.15em] uppercase">${sender}</span>
+    <p class="text-[13px] text-on-surface leading-relaxed">${text}</p>
+  `;
+  chatMessages.appendChild(msg);
+  scrollToBottom();
+  return msg;
+}
+
+// ── Set status indicator ──
+function setStatus(state, label) {
+  statusLed.className = 'w-2 h-2 rounded-full';
+  switch(state) {
+    case 'online': statusLed.classList.add('led-active'); break;
+    case 'listening': statusLed.classList.add('led-listening'); break;
+    case 'error': statusLed.classList.add('led-error'); break;
+    default: statusLed.classList.add('led-active');
+  }
+  statusText.textContent = label || state.toUpperCase();
+}
+
+// ═══ SEND COMMAND ═══
+async function sendCommand(text) {
+  if (!text.trim()) return;
+  input.value = '';
+  input.focus();
+
+  // Show user message
+  addMessage('Operator', `"${text}"`, 'user');
+  const loadingMsg = addMessage('System', 'Processing command...', 'loading');
+  setStatus('listening', 'PROCESSING');
+
+  try {
+    const res = await fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text })
+    });
+    const data = await res.json();
+
+    // Remove loading
+    loadingMsg.remove();
+
+    if (data.success) {
+      addMessage(`System [${data.action || 'Done'}]`, data.response || 'Task completed.', 'system');
+    } else {
+      addMessage('System Error', data.response || 'Unknown error occurred.', 'error');
+    }
+  } catch (e) {
+    loadingMsg.remove();
+    addMessage('System Error', 'Failed to reach OS Kernel. Is the server running?', 'error');
+  }
+
+  setStatus('online', 'ONLINE');
+}
+
+// ═══ VOICE RECOGNITION ═══
+let isListening = false;
+let voicePollInterval = null;
+
+async function startVoiceInput() {
+  if (isListening) return;
+  isListening = true;
+
+  // UI: show listening state
+  micBtn.classList.add('listening');
+  waveformContainer.classList.add('waveform-listening');
+  waveformLabel.textContent = 'LISTENING...';
+  setStatus('listening', 'LISTENING');
+  addMessage('System', 'Listening for voice command...', 'system');
+
+  try {
+    await fetch('/api/voice/start', { method: 'POST' });
+
+    // Poll for result
+    voicePollInterval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/voice/status');
+        const status = await res.json();
+
+        if (!status.listening) {
+          clearInterval(voicePollInterval);
+          voicePollInterval = null;
+          isListening = false;
+
+          // Reset UI
+          micBtn.classList.remove('listening');
+          waveformContainer.classList.remove('waveform-listening');
+          waveformLabel.textContent = 'IDLE';
+          setStatus('online', 'ONLINE');
+
+          if (status.transcript) {
+            // Got voice input - send as command
+            sendCommand(status.transcript);
+          } else if (status.error) {
+            addMessage('System', `Voice error: ${status.error}`, 'error');
+          } else {
+            addMessage('System', 'No speech detected. Try again.', 'system');
+          }
+        }
+      } catch (e) {
+        clearInterval(voicePollInterval);
+        voicePollInterval = null;
+        isListening = false;
+        micBtn.classList.remove('listening');
+        waveformContainer.classList.remove('waveform-listening');
+        waveformLabel.textContent = 'IDLE';
+        setStatus('error', 'ERROR');
+      }
+    }, 500);
+  } catch (e) {
+    isListening = false;
+    micBtn.classList.remove('listening');
+    waveformContainer.classList.remove('waveform-listening');
+    waveformLabel.textContent = 'IDLE';
+    setStatus('error', 'MIC ERROR');
+    addMessage('System Error', 'Could not start voice recognition.', 'error');
+  }
+}
+
+// ═══ EVENT LISTENERS ═══
+
+// Send button click
+sendBtn.addEventListener('click', () => sendCommand(input.value));
+
+// Enter key
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sendCommand(input.value);
+  }
+});
+
+// Mic button
+micBtn.addEventListener('click', () => startVoiceInput());
+
+// Clear button
+clearBtn.addEventListener('click', () => {
+  chatMessages.innerHTML = '';
+  addMessage('System', 'Chat log cleared.', 'system');
+});
+
+// Info button - show system info
+infoBtn.addEventListener('click', () => {
+  sendCommand('system info');
+});
+
+// Spacebar to start listening (when not typing)
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && document.activeElement !== input) {
+    e.preventDefault();
+    startVoiceInput();
+  }
+});
+
+// Focus input on load
+input.focus();
+
+console.log('[JARVIS] Neural OS Frontend initialized.');
+</script>
+</body>
+</html>

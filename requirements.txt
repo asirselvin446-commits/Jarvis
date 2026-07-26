@@ -1,0 +1,17 @@
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+PyAudio>=0.2.14
+pyautogui>=0.9.54
+psutil>=5.9.0
+pycaw>=20230407
+screen-brightness-control>=0.23.0
+comtypes>=1.4.0
+customtkinter>=5.2.0
+Pillow>=10.0.0
+requests>=2.31.0
+numpy<2
+chromadb>=0.4.20
+pydantic>=2.5.0
+flask>=3.0.0
+pywebview>=5.0.0
+pyinstaller>=6.3.0
