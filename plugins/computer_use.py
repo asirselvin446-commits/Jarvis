@@ -25,8 +25,9 @@ from core.tool_manager import tool
 # ─── Config ──────────────────────────────────────────────────────
 OLLAMA_VISION_URL = "http://localhost:11434/api/generate"
 VISION_MODEL = "qwen2.5vl:3b"
-MAX_STEPS = 6           # Safety limit: max actions per task
+MAX_STEPS = 10          # Safety limit: max actions per task
 STEP_DELAY = 1.0        # Seconds to wait between actions for UI to update
+VISION_RETRIES = 2      # Retry vision parsing this many times before giving up
 SCREENSHOT_QUALITY = 70 # JPEG quality for faster base64 transmission
 
 # Disable pyautogui's fail-safe pause for smoother automation
@@ -34,15 +35,23 @@ pyautogui.PAUSE = 0.3
 pyautogui.FAILSAFE = True  # Keep failsafe ON (move mouse to corner to abort)
 
 
-def _capture_screen_base64() -> str:
-    """Capture the full screen, resize for fast vision processing, and return base64 JPEG."""
+# Thumbnail dimensions used for vision processing
+THUMBNAIL_W = 1024
+THUMBNAIL_H = 576
+
+
+def _capture_screen_base64() -> tuple:
+    """Capture the full screen, resize for fast vision processing, and return (base64 JPEG, actual_w, actual_h, thumb_w, thumb_h)."""
     img = pyautogui.screenshot()
+    actual_w, actual_h = img.size
     img = img.convert("RGB")
-    img.thumbnail((1024, 576))  # 60% faster vision processing
+    img.thumbnail((THUMBNAIL_W, THUMBNAIL_H))
+    thumb_w, thumb_h = img.size  # Actual thumbnail dimensions after aspect-ratio preservation
     
     buffered = BytesIO()
     img.save(buffered, format="JPEG", quality=SCREENSHOT_QUALITY)
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return b64, actual_w, actual_h, thumb_w, thumb_h
 
 
 def _get_screen_size() -> tuple:
@@ -79,7 +88,8 @@ def _parse_action(response_text: str) -> dict:
     json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
     if json_match:
         try:
-            return json.loads(json_match.group(1))
+            json_str = json_match.group(1).replace('\\\\', '\\')
+            return json.loads(json_str)
         except json.JSONDecodeError:
             pass
     
@@ -99,6 +109,21 @@ def _parse_action(response_text: str) -> dict:
     
     # If nothing works, return error
     return {"action": "error", "detail": f"Could not parse action from: {response_text[:200]}"}
+
+
+def _scale_coordinates(action: dict, actual_w: int, actual_h: int, thumb_w: int, thumb_h: int) -> dict:
+    """Scale coordinates from thumbnail space to actual screen space."""
+    if "x" in action and "y" in action:
+        # The vision model sees the thumbnail, so its coordinates are in thumbnail space.
+        # Scale them proportionally to actual screen resolution.
+        scale_x = actual_w / thumb_w
+        scale_y = actual_h / thumb_h
+        action["x"] = int(int(action["x"]) * scale_x)
+        action["y"] = int(int(action["y"]) * scale_y)
+        # Clamp to screen bounds
+        action["x"] = max(0, min(action["x"], actual_w - 1))
+        action["y"] = max(0, min(action["y"], actual_h - 1))
+    return action
 
 
 def _execute_action(action: dict) -> str:
@@ -171,8 +196,22 @@ def _execute_action(action: dict) -> str:
         return f"Action execution error: {e}"
 
 
-def _build_vision_prompt(goal: str, step: int, history: list, screen_w: int, screen_h: int) -> str:
-    """Build the prompt for the vision model."""
+def _get_accessibility_context() -> str:
+    """Get UI element names from the accessibility tree for more reliable interaction."""
+    try:
+        from core.accessibility import get_clickable_elements, format_element_summary
+        elements = get_clickable_elements()
+        if elements:
+            summary = format_element_summary(elements, max_items=20)
+            return f"\nAccessibility-detected UI elements (with exact screen coordinates):\n{summary}\n"
+    except Exception as e:
+        print(f"[ComputerUse] Accessibility fallback: {e}")
+    return ""
+
+
+def _build_vision_prompt(goal: str, step: int, history: list, screen_w: int, screen_h: int,
+                         accessibility_context: str = "") -> str:
+    """Build the prompt for the vision model, enriched with accessibility data."""
     history_text = ""
     if history:
         history_text = "\n".join([f"  Step {i+1}: {h}" for i, h in enumerate(history)])
@@ -185,8 +224,9 @@ TASK: {goal}
 Screen resolution: {screen_w}x{screen_h} pixels.
 Current step: {step} of {MAX_STEPS}.
 {history_text}
-
+{accessibility_context}
 Look at the screenshot carefully. Decide the SINGLE NEXT action to take.
+If accessibility data is provided above, PREFER using those exact coordinates — they are more accurate than visual estimates.
 
 RULES:
 1. Return ONLY a JSON object with the action. No explanation.
@@ -212,6 +252,7 @@ def computer_use_loop(goal: str) -> str:
     """
     Main autonomous loop. Takes screenshots, asks vision model for actions,
     executes them, and repeats until done or safety limit reached.
+    Includes retry logic for vision parse failures and coordinate scaling.
     """
     screen_w, screen_h = _get_screen_size()
     history = []
@@ -219,30 +260,47 @@ def computer_use_loop(goal: str) -> str:
     print(f"[ComputerUse] Starting task: '{goal}' (max {MAX_STEPS} steps)")
     
     for step in range(1, MAX_STEPS + 1):
-        # 1. Capture screenshot
-        screenshot = _capture_screen_base64()
+        # 1. Capture screenshot (returns base64 + dimension info)
+        screenshot_b64, actual_w, actual_h, thumb_w, thumb_h = _capture_screen_base64()
         
-        # 2. Ask vision model what to do
-        prompt = _build_vision_prompt(goal, step, history, screen_w, screen_h)
-        vision_response = _ask_vision(screenshot, prompt)
-        print(f"[ComputerUse] Step {step} — Vision response: {vision_response[:150]}")
+        # 2. Get accessibility context (UI element names + coordinates)
+        accessibility_context = _get_accessibility_context()
         
-        # 3. Parse the action
-        action = _parse_action(vision_response)
+        # 3. Ask vision model what to do (with retry on parse failure)
+        action = None
+        for attempt in range(1, VISION_RETRIES + 1):
+            prompt = _build_vision_prompt(goal, step, history, thumb_w, thumb_h, accessibility_context)
+            vision_response = _ask_vision(screenshot_b64, prompt)
+            print(f"[ComputerUse] Step {step} (attempt {attempt}) — Vision response: {vision_response[:150]}")
+            
+            # 3. Parse the action
+            action = _parse_action(vision_response)
+            
+            # If parse succeeded (not an error), break out of retry loop
+            if action.get("action") != "error":
+                break
+            elif attempt < VISION_RETRIES:
+                print(f"[ComputerUse] Step {step} — Parse failed, retrying...")
+                time.sleep(0.5)  # Brief pause before retry
+        
         print(f"[ComputerUse] Step {step} — Parsed action: {action}")
         
-        # 4. Execute the action
+        # 4. Scale coordinates from thumbnail to actual screen resolution
+        if action.get("action") not in ("done", "error", "press", "hotkey", "wait"):
+            action = _scale_coordinates(action, actual_w, actual_h, thumb_w, thumb_h)
+        
+        # 5. Execute the action
         result = _execute_action(action)
         print(f"[ComputerUse] Step {step} — Result: {result}")
         history.append(result)
         
-        # 5. Check if done
+        # 6. Check if done
         if action.get("action") == "done" or result.startswith("DONE:"):
             summary = action.get("summary", "Task completed.")
             print(f"[ComputerUse] Task completed in {step} steps: {summary}")
             return summary
         
-        # 6. Wait for UI to update before next screenshot
+        # 7. Wait for UI to update before next screenshot
         time.sleep(STEP_DELAY)
     
     # Safety limit reached

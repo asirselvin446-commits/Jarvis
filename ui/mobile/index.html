@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0a0f1e">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="description" content="J.A.R.V.I.S. — Voice-Controlled PC Assistant">
+    <title>J.A.R.V.I.S. Remote</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        :root {
+            --bg-primary: #0a0f1e;
+            --bg-secondary: #111827;
+            --bg-card: #1a2332;
+            --accent: #3b82f6;
+            --accent-glow: rgba(59, 130, 246, 0.3);
+            --accent-orange: #f97316;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --success: #22c55e;
+            --error: #ef4444;
+            --border: rgba(255,255,255,0.08);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ─── Header ─── */
+        .header {
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo {
+            width: 32px;
+            height: 32px;
+            background: conic-gradient(var(--accent), var(--accent-orange), var(--accent));
+            border-radius: 50%;
+            animation: pulse-glow 3s ease-in-out infinite;
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 10px var(--accent-glow); }
+            50% { box-shadow: 0 0 25px var(--accent-glow), 0 0 50px rgba(59,130,246,0.1); }
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: 2px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--error);
+            transition: background 0.3s;
+        }
+        .status-dot.connected { background: var(--success); }
+
+        /* ─── Connection Bar ─── */
+        .connect-bar {
+            padding: 12px 20px;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .input-row input {
+            flex: 1;
+            padding: 10px 14px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 14px;
+            outline: none;
+        }
+
+        .input-row input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        .btn {
+            padding: 10px 18px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+        .btn-primary:active { transform: scale(0.96); }
+
+        .btn-secondary {
+            background: rgba(255,255,255,0.08);
+            color: var(--text-secondary);
+        }
+
+        /* ─── Screen View ─── */
+        .screen-section {
+            padding: 12px 20px;
+        }
+
+        .screen-frame {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 8px;
+            border: 1px solid var(--border);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .screen-frame img {
+            width: 100%;
+            border-radius: 8px;
+            display: block;
+        }
+
+        .screen-overlay {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            display: flex;
+            gap: 6px;
+        }
+
+        .screen-btn {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+        }
+
+        /* ─── Command Input ─── */
+        .command-section {
+            padding: 12px 20px;
+        }
+
+        .command-input-wrap {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .command-input {
+            flex: 1;
+            padding: 14px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            color: var(--text-primary);
+            font-size: 15px;
+            outline: none;
+        }
+
+        .command-input:focus {
+            border-color: var(--accent);
+        }
+
+        .voice-btn {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: 2px solid var(--accent);
+            background: transparent;
+            color: var(--accent);
+            font-size: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .voice-btn.listening {
+            background: var(--accent);
+            color: white;
+            animation: voice-pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes voice-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+            50% { box-shadow: 0 0 0 12px transparent; }
+        }
+
+        /* ─── Tool List ─── */
+        .tools-section {
+            padding: 12px 20px;
+        }
+
+        .tools-section h3 {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .tools-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+
+        .tool-card {
+            padding: 12px 8px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .tool-card:active {
+            background: var(--accent);
+            color: white;
+            transform: scale(0.96);
+        }
+
+        .tool-icon {
+            font-size: 24px;
+            margin-bottom: 6px;
+            display: block;
+        }
+
+        /* ─── Log ─── */
+        .log-section {
+            padding: 12px 20px 100px;
+        }
+
+        .log-section h3 {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .log-entry {
+            padding: 10px 14px;
+            background: var(--bg-card);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            border-left: 3px solid var(--accent);
+            font-size: 13px;
+            line-height: 1.4;
+        }
+
+        .log-entry.error { border-left-color: var(--error); }
+        .log-entry.success { border-left-color: var(--success); }
+
+        .log-entry .timestamp {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        /* ─── Loading ─── */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header -->
+    <div class="header">
+        <div class="header-title">
+            <div class="logo"></div>
+            <h1>J.A.R.V.I.S.</h1>
+        </div>
+        <div class="status-dot" id="statusDot" title="Disconnected"></div>
+    </div>
+
+    <!-- Connection -->
+    <div class="connect-bar">
+        <div class="input-row">
+            <input type="text" id="serverUrl" placeholder="Server URL (e.g., https://xxx.trycloudflare.com)" value="">
+            <input type="text" id="apiKey" placeholder="API Key" value="">
+        </div>
+        <div class="input-row">
+            <button class="btn btn-primary" onclick="connect()" id="connectBtn">Connect</button>
+            <button class="btn btn-secondary" onclick="disconnect()">Disconnect</button>
+        </div>
+    </div>
+
+    <!-- Screen View -->
+    <div class="screen-section">
+        <div class="screen-frame">
+            <img id="screenImg" src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='800' height='450'><rect fill='%231a2332' width='800' height='450'/><text fill='%2394a3b8' x='400' y='225' text-anchor='middle' font-family='sans-serif'>Connect to view screen</text></svg>" alt="Screen">
+            <div class="screen-overlay">
+                <button class="screen-btn" onclick="refreshScreen()" title="Refresh">🔄</button>
+                <button class="screen-btn" onclick="toggleAutoRefresh()" id="autoRefreshBtn" title="Auto-refresh">⏯</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Command Input -->
+    <div class="command-section">
+        <div class="command-input-wrap">
+            <input type="text" class="command-input" id="commandInput" placeholder="Type a command..." onkeydown="if(event.key==='Enter')sendCommand()">
+            <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()">🎤</button>
+        </div>
+    </div>
+
+    <!-- Quick Tools -->
+    <div class="tools-section">
+        <h3>Quick Actions</h3>
+        <div class="tools-grid">
+            <div class="tool-card" onclick="quickAction('get_system_status', {})">
+                <span class="tool-icon">📊</span>System
+            </div>
+            <div class="tool-card" onclick="quickAction('get_weather_brief', {city:'Chennai'})">
+                <span class="tool-icon">🌤</span>Weather
+            </div>
+            <div class="tool-card" onclick="quickAction('set_volume', {level:0})">
+                <span class="tool-icon">🔇</span>Mute
+            </div>
+            <div class="tool-card" onclick="quickAction('clipboard_read', {})">
+                <span class="tool-icon">📋</span>Clipboard
+            </div>
+            <div class="tool-card" onclick="quickAction('manage_power', {action:'lock'})">
+                <span class="tool-icon">🔒</span>Lock PC
+            </div>
+            <div class="tool-card" onclick="quickAction('read_emails', {count:3})">
+                <span class="tool-icon">📧</span>Emails
+            </div>
+        </div>
+    </div>
+
+    <!-- Activity Log -->
+    <div class="log-section">
+        <h3>Activity Log</h3>
+        <div id="logContainer"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let autoRefreshInterval = null;
+        let isAutoRefreshing = false;
+
+        // ─── Connection ─────────────────────────────────────
+        function connect() {
+            const url = document.getElementById('serverUrl').value.trim();
+            const key = document.getElementById('apiKey').value.trim();
+
+            if (!url) { addLog('Enter server URL', 'error'); return; }
+
+            // Save to localStorage
+            localStorage.setItem('jarvis_url', url);
+            localStorage.setItem('jarvis_key', key);
+
+            // Connect via WebSocket
+            const wsUrl = url.replace('https://', 'wss://').replace('http://', 'ws://');
+            const fullWsUrl = `${wsUrl}/ws?api_key=${encodeURIComponent(key)}`;
+
+            addLog('Connecting...', '');
+
+            try {
+                ws = new WebSocket(fullWsUrl);
+
+                ws.onopen = () => {
+                    document.getElementById('statusDot').classList.add('connected');
+                    document.getElementById('connectBtn').textContent = 'Connected';
+                    addLog('Connected to J.A.R.V.I.S.', 'success');
+                    refreshScreen();
+                    // Request tool list
+                    ws.send(JSON.stringify({type: 'list_tools'}));
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    handleWsMessage(data);
+                };
+
+                ws.onclose = () => {
+                    document.getElementById('statusDot').classList.remove('connected');
+                    document.getElementById('connectBtn').textContent = 'Connect';
+                    addLog('Disconnected', 'error');
+                };
+
+                ws.onerror = (err) => {
+                    addLog('Connection error', 'error');
+                };
+            } catch (e) {
+                addLog(`Connection failed: ${e.message}`, 'error');
+            }
+        }
+
+        function disconnect() {
+            if (ws) { ws.close(); ws = null; }
+            stopAutoRefresh();
+        }
+
+        function handleWsMessage(data) {
+            switch(data.type) {
+                case 'result':
+                    const cls = data.success ? 'success' : 'error';
+                    addLog(`[${data.tool}] ${data.result || data.error}`, cls);
+                    break;
+                case 'tools_list':
+                    addLog(`${data.tools.length} tools available`, 'success');
+                    break;
+                case 'event':
+                    addLog(`Event: ${data.event} — ${JSON.stringify(data.data)}`, '');
+                    break;
+                case 'pong':
+                    break;
+            }
+        }
+
+        // ─── Commands ───────────────────────────────────────
+        function sendCommand() {
+            const input = document.getElementById('commandInput');
+            const text = input.value.trim();
+            if (!text) return;
+
+            addLog(`> ${text}`, '');
+            input.value = '';
+
+            // Use REST API via the web server's /api/command endpoint
+            const url = document.getElementById('serverUrl').value.trim();
+            const key = document.getElementById('apiKey').value.trim();
+
+            // Try WebSocket first
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Send as natural language through the OS kernel endpoint
+                fetch(`${url}/api/execute`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': key
+                    },
+                    body: JSON.stringify({tool: 'execute_terminal', arguments: {command: text}})
+                })
+                .then(r => r.json())
+                .then(data => addLog(data.result || JSON.stringify(data), data.success ? 'success' : 'error'))
+                .catch(e => addLog(`Error: ${e.message}`, 'error'));
+            }
+        }
+
+        function quickAction(tool, args) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('Not connected', 'error');
+                return;
+            }
+
+            addLog(`Running ${tool}...`, '');
+            ws.send(JSON.stringify({type: 'execute', tool: tool, arguments: args}));
+        }
+
+        // ─── Screen ─────────────────────────────────────────
+        function refreshScreen() {
+            const url = document.getElementById('serverUrl').value.trim();
+            const key = document.getElementById('apiKey').value.trim();
+
+            if (!url) return;
+
+            fetch(`${url}/api/screen/base64?api_key=${encodeURIComponent(key)}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.image) {
+                        document.getElementById('screenImg').src = data.image;
+                    }
+                })
+                .catch(() => {});
+        }
+
+        function toggleAutoRefresh() {
+            if (isAutoRefreshing) {
+                stopAutoRefresh();
+            } else {
+                isAutoRefreshing = true;
+                document.getElementById('autoRefreshBtn').textContent = '⏸';
+                autoRefreshInterval = setInterval(refreshScreen, 3000);
+                addLog('Auto-refresh ON (3s)', 'success');
+            }
+        }
+
+        function stopAutoRefresh() {
+            isAutoRefreshing = false;
+            document.getElementById('autoRefreshBtn').textContent = '⏯';
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+
+        // ─── Voice (Web Speech API) ─────────────────────────
+        let recognition = null;
+
+        function toggleVoice() {
+            const btn = document.getElementById('voiceBtn');
+
+            if (recognition) {
+                recognition.stop();
+                recognition = null;
+                btn.classList.remove('listening');
+                return;
+            }
+
+            if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+                addLog('Speech recognition not supported', 'error');
+                return;
+            }
+
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recognition = new SpeechRecognition();
+            recognition.lang = 'en-US';
+            recognition.interimResults = false;
+
+            recognition.onstart = () => { btn.classList.add('listening'); };
+            recognition.onresult = (e) => {
+                const text = e.results[0][0].transcript;
+                document.getElementById('commandInput').value = text;
+                addLog(`🎤 "${text}"`, '');
+                sendCommand();
+            };
+            recognition.onerror = (e) => {
+                addLog(`Voice error: ${e.error}`, 'error');
+                btn.classList.remove('listening');
+                recognition = null;
+            };
+            recognition.onend = () => {
+                btn.classList.remove('listening');
+                recognition = null;
+            };
+
+            recognition.start();
+        }
+
+        // ─── Logging ────────────────────────────────────────
+        function addLog(message, type) {
+            const container = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            
+            const time = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="timestamp">${time}</span> — ${message}`;
+            
+            container.insertBefore(entry, container.firstChild);
+
+            // Keep max 50 entries
+            while (container.children.length > 50) {
+                container.removeChild(container.lastChild);
+            }
+        }
+
+        // ─── Init ───────────────────────────────────────────
+        window.addEventListener('load', () => {
+            const savedUrl = localStorage.getItem('jarvis_url');
+            const savedKey = localStorage.getItem('jarvis_key');
+            if (savedUrl) document.getElementById('serverUrl').value = savedUrl;
+            if (savedKey) document.getElementById('apiKey').value = savedKey;
+        });
+    </script>
+</body>
+</html>

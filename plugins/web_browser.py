@@ -5,6 +5,51 @@ Handles web searches and opening URLs.
 
 import webbrowser
 import urllib.parse
+import subprocess
+from config import APP_PATHS, DEFAULT_BROWSER
+
+def _is_process_running(process_name: str) -> bool:
+    """Check if a process is currently running."""
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {process_name}", "/NH"],
+            capture_output=True, text=True, timeout=5
+        )
+        return process_name.lower() in result.stdout.lower()
+    except Exception:
+        return False
+
+
+def _open_url(url: str):
+    """Opens a URL using the configured default browser, falling back to system default.
+    
+    Handles the Chrome profile picker issue: when Chrome is already running,
+    passing --profile-directory can trigger the profile picker dialog.
+    Instead, we detect if Chrome is running and open via 'start' command
+    which appends to the existing session.
+    """
+    if DEFAULT_BROWSER and DEFAULT_BROWSER.lower() in APP_PATHS:
+        browser_path = APP_PATHS[DEFAULT_BROWSER.lower()]
+        try:
+            if "chrome.exe" in browser_path.lower():
+                if _is_process_running("chrome.exe"):
+                    # Chrome is running — open new tab in existing session
+                    subprocess.Popen(f'start chrome "{url}"', shell=True)
+                else:
+                    # Chrome is NOT running — launch with profile flag
+                    subprocess.Popen(f'"{browser_path}" --profile-directory=Default "{url}"', shell=True)
+            elif "msedge.exe" in browser_path.lower():
+                if _is_process_running("msedge.exe"):
+                    subprocess.Popen(f'start msedge "{url}"', shell=True)
+                else:
+                    subprocess.Popen(f'"{browser_path}" "{url}"', shell=True)
+            else:
+                subprocess.Popen(f'"{browser_path}" "{url}"', shell=True)
+            return
+        except Exception as e:
+            print(f"[web_browser] Failed to open with {DEFAULT_BROWSER}: {e}")
+            
+    webbrowser.open(url)
 from core.tool_manager import tool
 
 @tool(
@@ -23,7 +68,7 @@ from core.tool_manager import tool
 )
 def search_google(query: str) -> str:
     url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
-    webbrowser.open(url)
+    _open_url(url)
     return f"Opened Google search for '{query}'."
 
 @tool(
@@ -57,12 +102,12 @@ def play_youtube(query: str) -> str:
         video_ids = re.findall(r"watch\?v=(\S{11})", html)
         if video_ids:
             play_url = f"https://www.youtube.com/watch?v={video_ids[0]}"
-            webbrowser.open(play_url)
+            _open_url(play_url)
             return f"Playing '{clean_query if clean_query else query}' on YouTube."
     except Exception as e:
         print(f"[play_youtube] Direct fetch error: {e}")
         
-    webbrowser.open(search_url)
+    _open_url(search_url)
     return f"Opened YouTube search for '{query}'."
 
 @tool(
@@ -99,5 +144,5 @@ def search_youtube(query: str) -> str:
 def open_website(url: str) -> str:
     if not url.startswith("http"):
         url = "https://" + url
-    webbrowser.open(url)
+    _open_url(url)
     return f"Opened website: {url}."

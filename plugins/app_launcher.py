@@ -76,6 +76,24 @@ def _find_app(app_name: str) -> str | None:
             
     return None
 
+from config import APP_PATHS, DEFAULT_BROWSER
+
+def _open_url(url: str):
+    """Opens a URL using the configured default browser, falling back to system default."""
+    if DEFAULT_BROWSER and DEFAULT_BROWSER.lower() in APP_PATHS:
+        browser_path = APP_PATHS[DEFAULT_BROWSER.lower()]
+        try:
+            if "chrome.exe" in browser_path.lower():
+                subprocess.Popen(f'"{browser_path}" --profile-directory=Default "{url}"', shell=True)
+            else:
+                subprocess.Popen(f'"{browser_path}" "{url}"', shell=True)
+            return
+        except Exception as e:
+            print(f"[app_launcher] Failed to open with {DEFAULT_BROWSER}: {e}")
+            
+    import webbrowser
+    webbrowser.open(url)
+
 @tool(
     name="open_application",
     description="Opens or launches a desktop application or program by name (e.g., 'chrome', 'spotify', 'notepad'). Do NOT use for websites.",
@@ -94,7 +112,9 @@ def open_application(app_name: str) -> str:
     app_path = _find_app(app_name)
     if app_path:
         try:
-            if app_path.startswith("ms-") or app_path.endswith(".lnk"):
+            if app_path.startswith("http"):
+                _open_url(app_path)
+            elif app_path.startswith("ms-") or app_path.endswith(".lnk"):
                 os.startfile(app_path)
             elif app_path.startswith("explorer shell:AppsFolder") or (" " in app_path and "--" in app_path):
                 subprocess.Popen(app_path, shell=True)

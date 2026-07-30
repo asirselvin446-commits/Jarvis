@@ -15,3 +15,15 @@ pydantic>=2.5.0
 flask>=3.0.0
 pywebview>=5.0.0
 pyinstaller>=6.3.0
+
+# ─── Voice Pipeline (New) ─────────────────────────────────
+
+faster-whisper>=1.0.0
+edge-tts>=6.1.0
+pygame>=2.5.0
+flask-sock>=0.7.0
+pystray>=0.19.0
+
+# ─── Cloud LLM (Gemini Flash via REST API) ─────────────────
+# No extra dependency needed — uses 'requests' (already listed above)
+# Set GOOGLE_API_KEY in .env to enable cloud mode

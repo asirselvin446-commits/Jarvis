@@ -63,3 +63,5 @@ Thumbs.db
 *.bak
 *.log
 .agents/
+dist_latest/
+cloudflared.exe
