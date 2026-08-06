@@ -1,0 +1,30 @@
+{
+  "name": "plugin_template",
+  "version": "1.0.0",
+  "description": "Template for creating new J.A.R.V.I.S plugins",
+  "author": "Your Name",
+  "entry_point": "plugin_module:PluginClass",
+  "dependencies": [],
+  "min_python_version": "3.9",
+  "max_python_version": null,
+  "enabled": true,
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable or disable this plugin"
+      },
+      "api_key": {
+        "type": "string",
+        "description": "API key for external service (if needed)"
+      },
+      "timeout": {
+        "type": "integer",
+        "default": 30,
+        "description": "Timeout in seconds for operations"
+      }
+    }
+  }
+}
