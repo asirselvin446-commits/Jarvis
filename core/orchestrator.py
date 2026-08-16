@@ -447,12 +447,26 @@ class Orchestrator:
         "whatever it takes", "do everything", "sort out", "take care of",
     )
 
+    # Imperative verbs that denote a discrete action. Two or more in one command
+    # (joined by "and"/"then"/comma) means it's multi-step and belongs in the
+    # agentic loop — e.g. "open Spotify and play a song" (open + play).
+    _ACTION_VERBS = frozenset({
+        "open", "close", "launch", "start", "play", "pause", "stop", "search",
+        "find", "google", "write", "type", "create", "make", "build", "send",
+        "email", "message", "text", "call", "set", "turn", "increase", "decrease",
+        "mute", "unmute", "download", "upload", "save", "delete", "remove", "read",
+        "tell", "show", "check", "summarize", "translate", "record", "screenshot",
+        "schedule", "remind", "add", "move", "copy", "rename", "install",
+        "uninstall", "update", "run", "execute", "browse", "navigate", "click",
+        "compose", "reply", "post", "share", "book", "order", "buy", "generate",
+    })
+
     def _is_agentic_goal(self, text: str) -> bool:
         """Heuristic: should this command run through the multi-step agentic loop?
 
-        Kept conservative so simple, latency-sensitive commands stay on the
-        fast single-shot path. Triggers on explicit sequencing/conditional
-        phrasing or requests that clearly chain several actions together.
+        Kept conservative so simple, latency-sensitive commands stay on the fast
+        single-shot path. Triggers on explicit sequencing/conditional phrasing,
+        or when a command chains two or more distinct actions together.
         """
         if not self.agentic_enabled:
             return False
@@ -463,10 +477,14 @@ class Orchestrator:
         if any(sig in t for sig in self._AGENTIC_SIGNALS):
             return True
 
-        # Multiple distinct actions joined by "and" (e.g. "open X and message Y"),
-        # but not trivial two-word combos.
-        if " and " in t and len(text.split()) >= 7:
-            return True
+        # Two or more distinct action verbs joined by a connector = multi-step.
+        # Catches short chains the old word-count rule missed, e.g.
+        # "open Spotify and play a song" and "open Notepad and write a haiku".
+        has_connector = (" and " in t) or (" then " in t) or ("," in text)
+        if has_connector:
+            verbs = {w for w in re.findall(r"[a-z]+", t) if w in self._ACTION_VERBS}
+            if len(verbs) >= 2:
+                return True
 
         return False
 

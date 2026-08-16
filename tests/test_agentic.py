@@ -173,8 +173,21 @@ class TestAgenticRouting:
             "research the top 3 laptops and make a comparison",
             "keep checking my downloads until the file appears",
             "organize my desktop files by type",
+            # Short two-verb chains that the old >=7-word rule missed:
+            "open Spotify and play a song",
+            "open Notepad and write something",
+            "turn on wifi and set brightness to 50",
         ]:
             assert o._is_agentic_goal(cmd) is True, cmd
+
+    def test_single_action_commands_stay_fast(self):
+        from core.orchestrator import Orchestrator
+
+        o = Orchestrator()
+        # One action verb -> fast path, even with extra words.
+        for cmd in ["play gone solo", "open spotify", "open youtube",
+                    "play despacito on youtube"]:
+            assert o._is_agentic_goal(cmd) is False, cmd
 
     def test_flag_disables_agentic_routing(self):
         from core.orchestrator import Orchestrator
