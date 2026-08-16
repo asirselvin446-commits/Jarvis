@@ -49,6 +49,9 @@ class ReActLoop:
     # Break out if the same (tool, args) pair is attempted this many times.
     MAX_REPEAT = 3
 
+    # How many times to retry a transient LLM/provider failure before giving up.
+    MAX_LLM_RETRIES = 3
+
     # Substrings in a tool name that mark it as potentially destructive/irreversible.
     # Catches high-risk tools that were never given an explicit is_dangerous flag.
     _DANGEROUS_NAME_HINTS = (
@@ -112,19 +115,42 @@ class ReActLoop:
             percent = int((iteration / self.max_iterations) * 85)
             self._notify_ui(goal, f"Step {iteration}: reasoning...", percent)
 
-            try:
-                # Call LLM with native function calling
-                result = llm_chat(messages, tools=tool_schemas, temperature=0.0, timeout=60)
-            except Exception as e:
-                logger.error("[ReActLoop] Iteration %d LLM call failed: %s", iteration, e)
-                scratchpad.append(StepResult(
-                    thought=f"LLM call failed: {e}",
-                    tool_name="ERROR",
-                    tool_args={},
-                    observation=str(e)
-                ))
-                time.sleep(1.0)
-                continue
+            # Call the LLM, retrying transient provider failures (rate limits,
+            # brief outages) with exponential backoff. A provider failure is NOT
+            # a finished answer, so we must not treat it as task completion.
+            result = None
+            for attempt in range(self.MAX_LLM_RETRIES + 1):
+                try:
+                    result = llm_chat(messages, tools=tool_schemas, temperature=0.0, timeout=60)
+                except Exception as e:
+                    logger.warning("[ReActLoop] LLM call raised (attempt %d): %s", attempt + 1, e)
+                    result = None
+                if result is not None and not result.get("provider_error"):
+                    break
+                if attempt < self.MAX_LLM_RETRIES:
+                    wait = min(2 ** attempt, 8)
+                    self._notify_ui(goal, f"AI is busy — retrying in {wait}s…", percent)
+                    logger.info("[ReActLoop] Provider busy; backing off %ds (attempt %d/%d)",
+                                wait, attempt + 1, self.MAX_LLM_RETRIES)
+                    time.sleep(wait)
+
+            if result is None or result.get("provider_error"):
+                # Model unreachable after retries — fail honestly, preserving
+                # whatever was accomplished. Do NOT call the LLM for a summary
+                # here (it would fail too); use a deterministic one.
+                logger.error("[ReActLoop] LLM retries exhausted; aborting workflow.")
+                self._notify_ui(goal, "AI unavailable", 100)
+                return AgenticResult(
+                    success=False,
+                    response=(
+                        "I lost the connection to the AI model partway through "
+                        "(most likely a rate limit on the free tier). "
+                        + self._deterministic_summary(scratchpad)
+                        + " Adding a GROQ_API_KEY would give more headroom, sir."
+                    ),
+                    steps=scratchpad,
+                    total_time=time.time() - start_time,
+                )
 
             # Check if LLM returned tool calls
             tool_calls = result.get("tool_calls", [])
@@ -250,6 +276,14 @@ class ReActLoop:
             steps=scratchpad,
             total_time=time.time() - start_time
         )
+
+    @staticmethod
+    def _deterministic_summary(scratchpad: List[StepResult]) -> str:
+        """Summarize actions taken WITHOUT calling the LLM (used when it's down)."""
+        tools = [s.tool_name for s in scratchpad if s.tool_name != "ERROR"]
+        if not tools:
+            return "I hadn't completed any actions yet."
+        return "So far I ran: " + ", ".join(tools[-6:]) + "."
 
     def _synthesize_summary(self, goal: str, scratchpad: List[StepResult]) -> str:
         """Produce a concise, natural spoken summary of what was accomplished.
