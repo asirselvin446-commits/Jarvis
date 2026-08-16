@@ -92,6 +92,7 @@ class StreamingSTT:
         silence_threshold_long: float = 3.0,
         energy_silence_db: float = -30.0,
         max_recording_seconds: float = 30.0,
+        vad_aggressiveness: int = 1,
     ):
         self.model_size = model_size
         self.device = device
@@ -100,6 +101,7 @@ class StreamingSTT:
         self.silence_threshold_long = silence_threshold_long
         self.energy_silence_db = energy_silence_db
         self.max_recording_seconds = max_recording_seconds
+        self.vad_aggressiveness = max(0, min(3, int(vad_aggressiveness)))
 
         # State
         self._model = None
@@ -108,7 +110,9 @@ class StreamingSTT:
         self._audio_lock = threading.Lock()
         self._silence_start: float | None = None
         self._speech_detected = False
-        self._vad = webrtcvad.Vad(3) # Aggressiveness 3 (highest) for filtering noise
+        # Lower aggressiveness = more sensitive to normal-volume speech, so the
+        # user doesn't have to shout. Configurable via config.VAD_AGGRESSIVENESS.
+        self._vad = webrtcvad.Vad(self.vad_aggressiveness)
         self._last_transcript = ""
         self._record_thread: threading.Thread | None = None
         self._running_thread = False

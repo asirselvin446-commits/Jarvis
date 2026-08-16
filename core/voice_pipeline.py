@@ -52,8 +52,11 @@ class VoicePipeline:
         stt_device: str = "cpu",
         tts_voice: str = "en-US-GuyNeural",
         tts_rate: str = "+10%",
+        tts_volume: str = "+50%",
         follow_up_window: float = 8.0,
         conversation_timeout: float = 30.0,
+        energy_silence_db: float = -45.0,
+        vad_aggressiveness: int = 1,
     ):
         # ── Configuration ────────────────────────────────────────
         self.follow_up_window = follow_up_window
@@ -66,19 +69,22 @@ class VoicePipeline:
         self._follow_up_timer: threading.Timer | None = None
         self._conversation_active = False
         self._last_activity_time: float = 0.0
+        self._last_tts_end_time: float = 0.0
 
         # ── Components ───────────────────────────────────────────
-        self._last_activity_time: float = 0.0
         self._interruption_thread: threading.Thread | None = None
 
         self.stt = StreamingSTT(
             model_size=stt_model,
             device=stt_device,
+            energy_silence_db=energy_silence_db,
+            vad_aggressiveness=vad_aggressiveness,
         )
 
         self.tts = InterruptibleTTS(
             voice=tts_voice,
             rate=tts_rate,
+            volume=tts_volume,
         )
 
         # ── Event queue for thread-safe state transitions ────────
@@ -128,19 +134,50 @@ class VoicePipeline:
             self._has_greeted = True
             def _boot_greeting():
                 import datetime
+                import os
+                import pygame
+                
                 hour = datetime.datetime.now().hour
                 if hour < 12:
                     greeting = "Good morning, sir. Systems are online."
+                    filename = "morning.mp3"
                 elif hour < 18:
                     greeting = "Good afternoon, sir. Systems are online."
+                    filename = "afternoon.mp3"
                 else:
                     greeting = "Good evening, sir. Systems are online."
+                    filename = "evening.mp3"
                 
                 if self.on_response:
                     self.on_response(greeting)
                 
                 self._set_state(PipelineState.SPEAKING)
-                self.tts.speak(greeting)
+                
+                # Check for cached greeting to eliminate synthesis latency
+                cached_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", filename))
+                if os.path.exists(cached_path):
+                    try:
+                        self.tts._init_pygame() # Ensure mixer is ready
+                        pygame.mixer.music.load(cached_path)
+                        pygame.mixer.music.play()
+                        while pygame.mixer.music.get_busy() and not self.tts._interrupted:
+                            time.sleep(0.05)
+                        
+                        if not self.tts._interrupted:
+                            self._event_queue.put(("tts_done", None))
+                        else:
+                            self._event_queue.put(("tts_interrupted", greeting))
+                            
+                        # Reset states since we bypassed tts.speak
+                        with self.tts._lock:
+                            self.tts._speaking = False
+                            self.tts._interrupted = False
+                            
+                    except Exception as e:
+                        logger.error("Failed to play cached greeting: %s", e)
+                        self.tts.speak(greeting) # Fallback to synthesizing
+                else:
+                    self.tts.speak(greeting)
             
             threading.Thread(target=_boot_greeting, daemon=True, name="boot-greeting").start()
 
@@ -207,19 +244,56 @@ class VoicePipeline:
 
         # Wake word detected → transition to LISTENING
         def _on_ambient_transcript(text):
+            import re
             text_lower = text.lower()
-            if self.state == PipelineState.AMBIENT and "jarvis" in text_lower:
-                logger.info("Wake word 'jarvis' heard in ambient audio.")
-                self._event_queue.put(("wake_word", None))
-            elif self.state == PipelineState.FOLLOW_UP and text.strip():
-                # In follow-up, any speech triggers
-                logger.info("Speech heard in follow-up: %s", text)
+            cleaned = text_lower.strip().replace(".", "").replace(",", "").replace("!", "").replace("?", "")
+            if not cleaned:
+                return
+
+            if "jarvis" in cleaned:
+                if self.state == PipelineState.SPEAKING:
+                    logger.info("Wake word heard during TTS — interrupting.")
+                    self._event_queue.put(("interrupt", None))
+                
+                # Strip wake word "jarvis" and optional leading fillers ("hey", "hi", "ok")
+                cmd = re.sub(r'\b(hey|hi|ok)?\s*jarvis\b', '', text_lower, flags=re.IGNORECASE).strip()
+                cmd = cmd.strip(".,!? ")
+
+                if cmd:
+                    logger.info("Wake word + command: '%s'", cmd)
+                    self._event_queue.put(("speech_final", cmd))
+                else:
+                    logger.info("Wake word only.")
+                    self._event_queue.put(("wake_word", None))
+            
+            elif self.state == PipelineState.FOLLOW_UP:
+                # Ignore audio recorded within 0.8s of TTS ending (speaker audio bleeding into mic)
+                if time.time() - self._last_tts_end_time < 0.8:
+                    logger.debug("Ignored speech right after TTS finished (echo protection): '%s'", text)
+                    return
+                
+                # Check for conversation completion phrases
+                if cleaned in ("thank you", "thanks", "that's all", "that is all", "never mind", "no thank you", "no thanks"):
+                    logger.info("User completed conversation in follow-up mode: '%s'", text)
+                    def _say_welcome():
+                        ack = "You're welcome, sir."
+                        if self.on_response:
+                            self.on_response(ack)
+                        self._set_state(PipelineState.SPEAKING)
+                        self.tts.speak(ack)
+                    threading.Thread(target=_say_welcome, daemon=True, name="welcome-response").start()
+                    return
+
+                phantom_words = ["you", "the", "a", "uh", "um", "yeah", "ok", "hallo"]
+                if cleaned in phantom_words or len(cleaned) < 2:
+                    logger.debug("Ignored phantom noise in follow-up mode: '%s'", text)
+                    return
+                
+                logger.info("Follow-up speech heard: %s", text)
                 self._event_queue.put(("speech_final", text))
-            elif self.state == PipelineState.SPEAKING and "jarvis" in text_lower:
-                # User interrupted by saying wake word
-                logger.info("Wake word heard during TTS — interrupting.")
-                self._event_queue.put(("interrupt", None))
-                self._event_queue.put(("wake_word", None))
+            elif self.state == PipelineState.LISTENING:
+                logger.info("Speech heard in state %s: %s", self.state.value, text)
+                self._event_queue.put(("speech_final", text))
 
         self.stt.on_ambient_transcript = _on_ambient_transcript
 
@@ -245,9 +319,8 @@ class VoicePipeline:
 
         # TTS callbacks
         def _on_speaking_start():
-            # Start STT in continuous mode if not already running, so it can catch wake word interruptions
-            if not self.stt.is_recording:
-                self.stt.start_recording(continuous=True)
+            # STT is always recording continuously now, so no need to start it here.
+            pass
 
         def _on_speaking_done():
             self._event_queue.put(("tts_done", None))
@@ -318,8 +391,8 @@ class VoicePipeline:
             self.tts.interrupt()
             self._start_listening()
 
-        elif current_state in (PipelineState.AMBIENT, PipelineState.FOLLOW_UP):
-            # Normal activation
+        elif current_state in (PipelineState.AMBIENT, PipelineState.FOLLOW_UP, PipelineState.PROCESSING):
+            # Normal activation or concurrent wake word
             logger.info("Wake word detected — activating.")
             self._cancel_follow_up_timer()
             self._start_listening()
@@ -328,14 +401,14 @@ class VoicePipeline:
             # Already listening — ignore
             logger.debug("Wake word while already LISTENING — ignoring.")
 
-        elif current_state == PipelineState.PROCESSING:
-            # Currently processing a command — queue for after
-            logger.debug("Wake word during PROCESSING — ignoring.")
-
     def _handle_speech_final(self, text: str, current_state: PipelineState):
         """Handle final transcription from STT."""
-        if current_state not in (PipelineState.LISTENING, PipelineState.FOLLOW_UP):
-            logger.debug("Got speech_final in state %s — ignoring.", current_state.value)
+        # Only accept new commands during appropriate states.
+        # During PROCESSING or SPEAKING, ignore new speech to prevent:
+        #   1. TTS output being re-captured as a new command
+        #   2. Duplicate/overlapping command execution
+        if current_state in (PipelineState.PROCESSING, PipelineState.SPEAKING):
+            logger.debug("Ignoring speech during %s state: '%s'", current_state.value, text)
             return
 
         cleaned_text = text.lower().strip().replace(".", "").replace(",", "").replace("!", "").replace("?", "")
@@ -362,9 +435,7 @@ class VoicePipeline:
     def _handle_text_command(self, text: str, current_state: PipelineState):
         """Handle a typed text command."""
         # Stop anything currently happening
-        if current_state == PipelineState.LISTENING:
-            self.stt.stop_recording()
-        elif current_state == PipelineState.SPEAKING:
+        if current_state == PipelineState.SPEAKING:
             self.tts.interrupt()
 
         self._cancel_follow_up_timer()
@@ -375,18 +446,16 @@ class VoicePipeline:
         if current_state != PipelineState.SPEAKING:
             return
 
-        # Enter follow-up window — user can speak without wake word
-        self._set_state(PipelineState.FOLLOW_UP)
-        self._conversation_active = True
-        self._last_activity_time = time.time()
-
-        # Start follow-up timer
-        self._start_follow_up_timer()
-
-        # Start STT to catch follow-up without wake word
-        if self.stt.is_recording:
-            self.stt.stop_recording()
-        self.stt.start_recording(continuous=True)
+        self._last_tts_end_time = time.time()
+        if self.follow_up_window > 0:
+            # Enter follow-up window — user can speak without wake word
+            self._set_state(PipelineState.FOLLOW_UP)
+            self._conversation_active = True
+            self._last_activity_time = time.time()
+            self._start_follow_up_timer()
+        else:
+            # Return to ambient wake-word mode immediately (prevents background noise from processing)
+            self._return_to_ambient()
 
     def _handle_tts_interrupted(self, spoken_so_far: str, current_state: PipelineState):
         """Handle TTS being interrupted by user."""
@@ -403,8 +472,6 @@ class VoicePipeline:
         """Handle manual interrupt request."""
         if current_state == PipelineState.SPEAKING:
             self.tts.interrupt()
-        elif current_state == PipelineState.LISTENING:
-            self.stt.stop_recording()
         elif current_state == PipelineState.PROCESSING:
             pass  # Can't easily cancel LLM processing
 
@@ -430,21 +497,13 @@ class VoicePipeline:
         except Exception as e:
             logger.error("Failed to play wake sound: %s", e)
 
-        # Restart STT in final-capture mode
-        if self.stt.is_recording:
-            self.stt.stop_recording()
-        self.stt.start_recording(continuous=False)
-
-        # No passive listening method needed anymore; we just use STT continuous mode
-        pass
+        # No need to restart STT, it's running continuously.
 
     def _process_command(self, text: str):
         """Process a voice/text command through the orchestrator."""
         self._set_state(PipelineState.PROCESSING)
         self._last_activity_time = time.time()
-        
-        if self.stt.is_recording:
-            self.stt.stop_recording()
+        # No need to stop STT, it stays continuous to catch overlapping commands
 
         def _do_process():
             try:
@@ -495,13 +554,9 @@ class VoicePipeline:
         """Return to ambient wake word listening."""
         self._cancel_follow_up_timer()
 
-        # Restart STT in continuous ambient mode
-        if self.stt.is_recording:
-            self.stt.stop_recording()
-            
+        # STT continues running continuously in the background
         self._conversation_active = False
         self._set_state(PipelineState.AMBIENT)
-        self.stt.start_recording(continuous=True)
 
     def _start_follow_up_timer(self):
         """Start a timer that returns to ambient after follow_up_window seconds."""

@@ -12,7 +12,9 @@ import threading
 import logging
 import time
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
+
+from core.security import RateLimiter
 
 logger = logging.getLogger("jarvis.web_server")
 
@@ -31,6 +33,29 @@ app = Flask(
     template_folder=os.path.join(BASE_DIR, "templates"),
     static_folder=os.path.join(BASE_DIR, "static"),
 )
+
+# ── Security: Request body size limit (10KB) ────────────────────
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024  # 10KB
+
+# ── Security: Rate limiter for API endpoints ─────────────────────
+_api_rate_limiter = RateLimiter(max_requests=30, window_seconds=60)
+
+
+@app.after_request
+def _add_security_headers(response: Response):
+    """Add security headers and disable aggressive WebView caching."""
+    # CORS: Only allow same-origin requests
+    response.headers['Access-Control-Allow-Origin'] = 'http://127.0.0.1:5000'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    # Prevent MIME sniffing & clickjacking
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    # Prevent WebView2 / browser caching of dynamic templates and assets
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 # ── Core systems (initialized lazily) ────────────────────────────
 _kernel = None
@@ -73,8 +98,11 @@ def _get_pipeline():
             stt_device=config.STT_DEVICE,
             tts_voice=config.TTS_VOICE,
             tts_rate=config.TTS_RATE,
+            tts_volume=config.TTS_VOLUME,
             follow_up_window=config.FOLLOW_UP_WINDOW,
             conversation_timeout=config.CONVERSATION_TIMEOUT,
+            energy_silence_db=config.ENERGY_SILENCE_DB,
+            vad_aggressiveness=getattr(config, "VAD_AGGRESSIVENESS", 1),
         )
 
         # ── Wire pipeline callbacks to WebSocket broadcast ───────
@@ -106,9 +134,9 @@ def _get_pipeline():
             # Get conversation context for the LLM
             context = _conversation.get_context_for_llm()
 
-            # Process through the orchestrator with conversation context
+            # Process through the kernel unified pipeline with conversation context
             kernel = _get_kernel()
-            result = kernel.orchestrator.process_command(text, conversation_context=context)
+            result = kernel.process_command(text, conversation_context=context)
 
             # Record the response
             _conversation.add_assistant_turn(result.get("response", "Done."))
@@ -122,6 +150,52 @@ def _get_pipeline():
 
         # Start the environment monitor
         _environment.start()
+
+        # Subscribe to Message Bus to broadcast agent activity to UI
+        from core.message_bus import get_message_bus
+        bus = get_message_bus()
+        def _on_bus_event(msg):
+            safe_payload = {}
+            for k, v in msg.payload.items():
+                if isinstance(v, (str, int, float, bool, type(None))):
+                    safe_payload[k] = v
+                elif isinstance(v, (dict, list)):
+                    safe_payload[k] = str(v)
+                else:
+                    safe_payload[k] = str(v)
+            _broadcast({
+                "type": "bus_event",
+                "topic": msg.topic,
+                "sender": msg.sender,
+                "payload": safe_payload
+            })
+        bus.subscribe("*", _on_bus_event)
+
+        # Telemetry loop: sends CPU, RAM, LLM provider, and skills stats every 3s
+        def _telemetry_loop():
+            import psutil
+            from core.llm_provider import get_provider_name, is_online
+            from core.skills.skill_manager import get_skill_manager
+            while True:
+                time.sleep(3)
+                try:
+                    cpu = psutil.cpu_percent(interval=None)
+                    ram = psutil.virtual_memory().percent
+                    provider = get_provider_name()
+                    online = is_online()
+                    skills_cnt = len(get_skill_manager().skills)
+                    _broadcast({
+                        "type": "system_telemetry",
+                        "cpu": cpu,
+                        "ram": ram,
+                        "provider": provider,
+                        "online": online,
+                        "active_skills": skills_cnt
+                    })
+                except Exception as e:
+                    logger.debug("Telemetry error: %s", e)
+
+        threading.Thread(target=_telemetry_loop, daemon=True, name="system-telemetry").start()
 
     return _pipeline
 
@@ -173,9 +247,13 @@ def index():
 def handle_command():
     """Handle text commands (from the input box)."""
     try:
+        # Rate limiting
+        if not _api_rate_limiter.allow():
+            return jsonify({"success": False, "response": "Rate limit exceeded. Try again later.", "action": ""}), 429
+
         data = request.json
-        text = data.get("text", "")
-        if not text:
+        text = data.get("text", "") if data else ""
+        if not text or not text.strip():
             return jsonify({"success": False, "response": "Empty command", "action": ""})
 
         pipeline = _get_pipeline()
@@ -268,6 +346,20 @@ def environment_state():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+@app.route("/api/desktop", methods=["GET"])
+def desktop_state():
+    """Get current desktop context."""
+    try:
+        from core.desktop_monitor import get_desktop_monitor
+        dm = get_desktop_monitor()
+        return jsonify({
+            "app": dm.current_app_exe,
+            "title": dm.current_app_title,
+            "context": dm.get_current_context()
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 
 # ── WebSocket endpoint ───────────────────────────────────────────
 
@@ -354,18 +446,97 @@ except ImportError:
     logger.warning("flask-sock not installed. WebSocket support disabled. Install with: pip install flask-sock")
 
 
-# ── Legacy voice endpoints (kept for backward compatibility) ─────
+# ── Tactical, Dev, and Automation endpoints for Stark Mark VIII HUD ─────
 
-@app.route("/api/voice/speak", methods=["POST"])
-def voice_speak():
-    """Speak text aloud via the new TTS engine."""
+@app.route("/api/tactical/intel", methods=["GET"])
+def tactical_intel():
+    """Get live world news and financial feeds."""
     try:
-        data = request.json
-        text = data.get("text", "")
-        if text:
-            pipeline = _get_pipeline()
-            pipeline.tts.speak(text)
-        return jsonify({"success": True})
+        from plugins.tactical_intelligence import get_world_news, get_world_finance_news
+        news = get_world_news("general", limit=3)
+        finance = get_world_finance_news()
+        return jsonify({
+            "success": True,
+            "news": news,
+            "finance": finance
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/automation/pipelines", methods=["GET"])
+def list_pipelines():
+    """List available master automation presets."""
+    try:
+        from core.automation_engine import get_automation_engine
+        engine = get_automation_engine()
+        return jsonify({"success": True, "presets": engine.list_presets()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/automation/run", methods=["POST"])
+def run_pipeline():
+    """Trigger a master automation pipeline preset."""
+    try:
+        data = request.json or {}
+        preset_id = data.get("preset_id", "")
+        if not preset_id:
+            return jsonify({"success": False, "error": "No preset_id provided"})
+        
+        from core.automation_engine import get_automation_engine
+        engine = get_automation_engine()
+        result = engine.run_preset(preset_id)
+        return jsonify({"success": True, "result": result})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/dev/context", methods=["GET"])
+def dev_context():
+    """Get project git status and Bolt dev environment details."""
+    try:
+        from plugins.coworker_tools import inspect_project_context
+        from plugins.bolt_dev_engine import bolt_inspect_app
+        ctx = inspect_project_context()
+        bolt = bolt_inspect_app("jarvisautoapp")
+        return jsonify({
+            "success": True,
+            "context": ctx,
+            "bolt_app": bolt
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/status", methods=["GET"])
+def system_status():
+    """Get full system telemetry including GPU, RAM, MCP, and active tools."""
+    try:
+        import psutil
+        from core.tool_manager import ToolManager
+        tm = ToolManager()
+        tools_count = len(tm.tools)
+        
+        gpu_info = "RTX 4050 6GB"
+        try:
+            import subprocess
+            res = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,temperature.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2)
+            if res.returncode == 0 and res.stdout.strip():
+                parts = res.stdout.strip().split(",")
+                gpu_info = f"{parts[0].strip()} ({parts[1].strip()}MB / {parts[2].strip()}°C)"
+        except Exception:
+            pass
+
+        return jsonify({
+            "success": True,
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "ram_percent": psutil.virtual_memory().percent,
+            "gpu": gpu_info,
+            "tools_count": tools_count,
+            "mcp_port": 8000,
+            "status": "ONLINE"
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 

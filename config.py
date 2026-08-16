@@ -61,6 +61,12 @@ STT_MODEL = "base.en"                # Whisper model size
 STT_DEVICE = "cpu"                   # Keep GPU free for Qwen LLM
 STT_COMPUTE_TYPE = "int8"            # Fast CPU inference
 
+# Voice Activity Detection sensitivity (webrtcvad): 0-3.
+# LOWER = more sensitive (picks up normal/quiet speech), HIGHER = filters more
+# aggressively (needs loud, clear speech). 1 = you shouldn't have to raise your
+# voice; raise toward 3 only if a noisy room causes false triggers.
+VAD_AGGRESSIVENESS = 1
+
 # Intelligent Silence Detection
 SILENCE_THRESHOLD_SHORT = 1.5        # Seconds — speech likely done
 SILENCE_THRESHOLD_LONG = 3.0         # Seconds — mid-sentence pause tolerance
