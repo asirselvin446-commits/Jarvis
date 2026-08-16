@@ -50,7 +50,7 @@ class TestReActLoop:
         ]
         state = {"i": 0}
 
-        def fake_chat(messages, tools=None, temperature=0.0, timeout=60):
+        def fake_chat(messages, tools=None, temperature=0.0, timeout=60, **kwargs):
             r = seq[state["i"]]
             state["i"] += 1
             return r
@@ -69,7 +69,7 @@ class TestReActLoop:
 
         stuck = _tool_call("retry", {"x": 1})
         monkeypatch.setattr(al, "llm_chat",
-                            lambda messages, tools=None, temperature=0.0, timeout=60: stuck)
+                            lambda messages, tools=None, temperature=0.0, timeout=60, **kwargs: stuck)
 
         reg = _FakeRegistry()
         res = al.ReActLoop(max_iterations=20, registry=reg).run("impossible", context="")
@@ -82,7 +82,7 @@ class TestReActLoop:
     def test_summary_fallback_when_llm_summary_fails(self, monkeypatch):
         import core.agentic_loop as al
 
-        def boom(messages, tools=None, temperature=0.0, timeout=60):
+        def boom(messages, tools=None, temperature=0.0, timeout=60, **kwargs):
             raise RuntimeError("no llm")
 
         monkeypatch.setattr(al, "llm_chat", boom)
@@ -108,7 +108,7 @@ class TestSafetyGate:
         ]
         state = {"i": 0}
 
-        def fake_chat(messages, tools=None, temperature=0.0, timeout=60):
+        def fake_chat(messages, tools=None, temperature=0.0, timeout=60, **kwargs):
             r = seq[min(state["i"], len(seq) - 1)]
             state["i"] += 1
             return r
@@ -133,7 +133,7 @@ class TestSafetyGate:
         ]
         state = {"i": 0}
 
-        def fake_chat(messages, tools=None, temperature=0.0, timeout=60):
+        def fake_chat(messages, tools=None, temperature=0.0, timeout=60, **kwargs):
             r = seq[min(state["i"], len(seq) - 1)]
             state["i"] += 1
             return r

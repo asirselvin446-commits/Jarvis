@@ -1,29 +1,38 @@
 SpeechRecognition>=3.10.0
 pyttsx3>=2.90
 PyAudio>=0.2.14
-pyautogui>=0.9.54
+pyautogui>=0.9.50
 psutil>=5.9.0
 pycaw>=20230407
 screen-brightness-control>=0.23.0
 comtypes>=1.4.0
 customtkinter>=5.2.0
 Pillow>=10.0.0
-requests>=2.31.0
-numpy<2
-chromadb>=0.4.20
-pydantic>=2.5.0
+requests>=2.28.0
+numpy>=1.24.0
+chromadb>=0.5.0
+pydantic>=2.0.0
 flask>=3.0.0
 pywebview>=5.0.0
-pyinstaller>=6.3.0
+pyinstaller>=6.0.0
+python-dotenv>=1.0.0
 
-# ─── Voice Pipeline (New) ─────────────────────────────────
-
+# ─── Voice Pipeline ─────────────────────────────────────
 faster-whisper>=1.0.0
 edge-tts>=6.1.0
 pygame>=2.5.0
 flask-sock>=0.7.0
 pystray>=0.19.0
+soundfile>=0.12.0
 
 # ─── Cloud LLM (Gemini Flash via REST API) ─────────────────
-# No extra dependency needed — uses 'requests' (already listed above)
+# No extra dependency — uses 'requests' (already listed above)
 # Set GOOGLE_API_KEY in .env to enable cloud mode
+
+# ─── Anthropic Claude (best-in-class coding / building) ────
+# Set ANTHROPIC_API_KEY in .env to build anything by voice with Claude
+anthropic>=0.40.0
+
+# ─── Testing ─────────────────────────────────────────────
+pytest>=7.0.0
+pytest-asyncio>=0.21.0

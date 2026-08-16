@@ -35,6 +35,13 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
+# Anthropic Claude — the highest-quality provider, used for building/coding.
+# Opus 4.8 is the most capable; override with ANTHROPIC_MODEL if desired.
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "8192"))
+# When true, Claude is tried first for every request (not just build tasks).
+PREFER_CLAUDE = os.environ.get("PREFER_CLAUDE", "false").lower() in ("true", "1", "yes")
+
 # If True, NEVER fall back to local Ollama — protects GPU VRAM
 PREFER_CLOUD_ONLY = os.environ.get("PREFER_CLOUD_ONLY", "false").lower() in ("true", "1", "yes")
 
@@ -75,6 +82,16 @@ def _get_groq_api_key() -> Optional[str]:
 def _get_openrouter_api_key() -> Optional[str]:
     """Get the OpenRouter API key from environment (free at openrouter.ai)."""
     return os.environ.get("OPENROUTER_API_KEY")
+
+
+def _get_anthropic_api_key() -> Optional[str]:
+    """Get the Anthropic (Claude) API key from environment."""
+    return os.environ.get("ANTHROPIC_API_KEY")
+
+
+def has_claude() -> bool:
+    """True if a Claude API key is configured."""
+    return bool(_get_anthropic_api_key())
 
 
 def is_online() -> bool:
@@ -129,13 +146,16 @@ def is_online() -> bool:
 
 def get_provider_name() -> str:
     """Return the name of the currently active provider."""
+    if _get_anthropic_api_key() and PREFER_CLAUDE:
+        return f"Claude ({ANTHROPIC_MODEL})"
+    claude_suffix = " + Claude (build)" if _get_anthropic_api_key() else ""
     if is_online():
-        return "Cloud (Gemini Flash)"
+        return f"Cloud (Gemini Flash){claude_suffix}"
     if _get_groq_api_key():
-        return f"Cloud (Groq {GROQ_MODEL})"
+        return f"Cloud (Groq {GROQ_MODEL}){claude_suffix}"
     if _get_openrouter_api_key():
-        return f"Cloud (OpenRouter)"
-    return "Local (Ollama qwen2.5:7b)"
+        return f"Cloud (OpenRouter){claude_suffix}"
+    return f"Local (Ollama qwen2.5:7b){claude_suffix}"
 
 
 # ─── Gemini API Helpers ──────────────────────────────────────────
@@ -222,6 +242,98 @@ def _clean_params_for_gemini(params: dict) -> dict:
         cleaned["required"] = params["required"]
     
     return cleaned
+
+
+# ─── Anthropic Claude Helpers ────────────────────────────────────
+
+_anthropic_client = None
+
+
+def _get_anthropic_client():
+    """Lazily build a cached Anthropic SDK client."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=_get_anthropic_api_key())
+    return _anthropic_client
+
+
+def _convert_messages_to_anthropic(messages: List[Dict]) -> tuple:
+    """Split Jarvis messages into (system_str, anthropic_messages).
+
+    Anthropic takes the system prompt as a top-level arg, and message roles are
+    only 'user'/'assistant'. System turns are merged into the system string.
+    """
+    system_parts: List[str] = []
+    conv: List[Dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            if content:
+                system_parts.append(str(content))
+        else:
+            conv.append({"role": "assistant" if role == "assistant" else "user",
+                         "content": str(content)})
+    # Anthropic requires the first message to be from the user.
+    if not conv or conv[0]["role"] != "user":
+        conv.insert(0, {"role": "user", "content": "(begin)"})
+    return "\n\n".join(system_parts), conv
+
+
+def _convert_tools_to_anthropic(tools: Optional[List[Dict]]) -> Optional[List[Dict]]:
+    """Convert OpenAI-style tool schemas to Anthropic's {name, description, input_schema}."""
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        fn = t.get("function", t)
+        out.append({
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+    return out
+
+
+def _anthropic_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
+                    temperature: float = 0.0, timeout: int = 120) -> Dict:
+    """
+    Call Claude via the official Anthropic SDK and return the Jarvis-standard
+    {"content": str, "tool_calls": [{"function": {"name", "arguments"}}]} shape.
+
+    NOTE: Opus 4.8 rejects `temperature` (400), so it is deliberately NOT sent.
+    """
+    client = _get_anthropic_client()
+    system_str, conv = _convert_messages_to_anthropic(messages)
+    kwargs: Dict[str, Any] = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
+        "messages": conv,
+    }
+    if system_str:
+        kwargs["system"] = system_str
+    atools = _convert_tools_to_anthropic(tools)
+    if atools:
+        kwargs["tools"] = atools
+
+    resp = client.with_options(timeout=float(timeout)).messages.create(**kwargs)
+
+    result: Dict[str, Any] = {"content": "", "tool_calls": []}
+    for block in resp.content:
+        btype = getattr(block, "type", None)
+        if btype == "text":
+            result["content"] += getattr(block, "text", "")
+        elif btype == "tool_use":
+            result["tool_calls"].append({
+                "function": {
+                    "name": getattr(block, "name", ""),
+                    "arguments": getattr(block, "input", {}) or {},
+                }
+            })
+    if not result["tool_calls"]:
+        del result["tool_calls"]
+    return result
 
 
 def _gemini_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
@@ -661,14 +773,29 @@ def llm_chat_stream(messages: List[Dict], tools: Optional[List[Dict]] = None,
 # ─── Public API ──────────────────────────────────────────────────
 
 def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
-             temperature: float = 0.0, timeout: int = 60) -> Dict:
+             temperature: float = 0.0, timeout: int = 60,
+             prefer: Optional[str] = None) -> Dict:
     """
     Send a chat completion request to the best available LLM:
+    0. Anthropic Claude (highest quality — if ANTHROPIC_API_KEY and preferred)
     1. Google Gemini Flash (free — if GOOGLE_API_KEY present and online)
     2. Groq (free — if GROQ_API_KEY present)
     3. OpenRouter (free — if OPENROUTER_API_KEY present)
     4. Local Ollama (qwen2.5:7b)
+
+    Set ``prefer="anthropic"`` (or env PREFER_CLAUDE=true) to route to Claude
+    first — used for building/coding, where quality matters most. Claude
+    failures fall through to the free providers below.
     """
+    # ── Anthropic Claude (opt-in: coding/build tasks) ────────────
+    if _get_anthropic_api_key() and (prefer == "anthropic" or PREFER_CLAUDE):
+        try:
+            result = _anthropic_chat(messages, tools, temperature, max(timeout, 120))
+            logger.debug("[LLM] Claude call succeeded")
+            return result
+        except Exception as e:
+            logger.warning("[LLM] Claude call failed (%s), falling back to other providers", e)
+
     api_key = _get_api_key()
     if api_key:
         try:

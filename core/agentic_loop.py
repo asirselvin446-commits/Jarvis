@@ -71,6 +71,25 @@ class ReActLoop:
         #   "guarded" (default) — refuse dangerous tools and ask the user to confirm
         #   "full"              — execute everything, no confirmation
         self.autonomy = (autonomy or os.environ.get("JARVIS_AGENTIC_AUTONOMY", "guarded")).lower()
+        # LLM routing for the agentic brain. JARVIS_AGENTIC_PROVIDER:
+        #   "auto" (default) — use Claude if an ANTHROPIC_API_KEY is present, else free tier
+        #   "claude"         — always use Claude
+        #   "free"           — never use Claude (Gemini/Groq/OpenRouter/Ollama)
+        # Claude is the strongest coder, so building/coding tasks route to it.
+        self.prefer_llm = self._resolve_llm_preference()
+
+    @staticmethod
+    def _resolve_llm_preference() -> Optional[str]:
+        mode = os.environ.get("JARVIS_AGENTIC_PROVIDER", "auto").lower()
+        if mode == "free":
+            return None
+        if mode == "claude":
+            return "anthropic"
+        try:
+            from core.llm_provider import has_claude
+            return "anthropic" if has_claude() else None
+        except Exception:
+            return None
 
     def _is_dangerous(self, tool_name: str) -> bool:
         """Decide whether a tool needs explicit confirmation before running.
@@ -138,7 +157,8 @@ class ReActLoop:
             result = None
             for attempt in range(self.MAX_LLM_RETRIES + 1):
                 try:
-                    result = llm_chat(messages, tools=tool_schemas, temperature=0.0, timeout=60)
+                    result = llm_chat(messages, tools=tool_schemas, temperature=0.0,
+                                      timeout=120, prefer=self.prefer_llm)
                 except Exception as e:
                     logger.warning("[ReActLoop] LLM call raised (attempt %d): %s", attempt + 1, e)
                     result = None
