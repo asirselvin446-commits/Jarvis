@@ -15,8 +15,54 @@ import wave
 import tempfile
 import os
 import numpy as np
+import webrtcvad
 
 logger = logging.getLogger("jarvis.streaming_stt")
+
+# Phrases Whisper commonly hallucinates on silence / background noise.
+# These are dropped from transcripts so Jarvis never acts on imaginary speech.
+_WHISPER_HALLUCINATIONS = {
+    "thank you", "thank you.", "thanks for watching", "thanks for watching!",
+    "thank you for watching", "thank you for watching.", "please subscribe",
+    "subscribe", "you", "you.", ".", "..", "...", "bye", "bye.", "okay",
+    "thank you very much", "thanks", "thanks.", "the", "so", "yeah",
+    "i'm sorry", "i'm sorry.", "thank you so much", "please subscribe to my channel",
+    "thank you for watching!", "♪", "[music]", "(music)", "[silence]",
+    "peace", "peace.", "amen", "amen.", "oh", "oh.", "hmm", "mm", "mmm",
+}
+
+# Vocabulary hint fed to Whisper to bias decoding toward assistant commands and
+# proper nouns it would otherwise mishear. This measurably improves accuracy on
+# the words that matter most for a voice assistant.
+_STT_INITIAL_PROMPT = (
+    "Jarvis, open, close, launch, play, pause, search, Google, YouTube, Spotify, "
+    "Chrome, volume, brightness, screenshot, email, WhatsApp, remind me, schedule, "
+    "shut down, restart, terminal, PowerShell, file, folder, code, commit."
+)
+
+
+def _clean_transcript(text: str) -> str:
+    """Drop Whisper hallucinations and junk; return '' if nothing meaningful remains."""
+    if not text:
+        return ""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    # Normalize for comparison: lowercase, collapse whitespace.
+    normalized = " ".join(stripped.lower().split())
+    if normalized in _WHISPER_HALLUCINATIONS:
+        logger.debug("[STT] Dropped hallucinated transcript: %r", stripped)
+        return ""
+    # No letters or digits at all (e.g. "....", "♪♪") — pure punctuation/noise.
+    if not any(c.isalnum() for c in normalized):
+        logger.debug("[STT] Dropped non-alphanumeric transcript: %r", stripped)
+        return ""
+    # A single repeated token ("you you you", ".....") is almost always noise.
+    tokens = normalized.replace(".", "").split()
+    if tokens and len(set(tokens)) == 1 and len(tokens) >= 3:
+        logger.debug("[STT] Dropped repeated-token noise: %r", stripped)
+        return ""
+    return stripped
 
 
 class StreamingSTT:
@@ -44,7 +90,7 @@ class StreamingSTT:
         compute_type: str = "int8",
         silence_threshold_short: float = 1.5,
         silence_threshold_long: float = 3.0,
-        energy_silence_db: float = -40.0,
+        energy_silence_db: float = -30.0,
         max_recording_seconds: float = 30.0,
     ):
         self.model_size = model_size
@@ -62,10 +108,15 @@ class StreamingSTT:
         self._audio_lock = threading.Lock()
         self._silence_start: float | None = None
         self._speech_detected = False
+        self._vad = webrtcvad.Vad(3) # Aggressiveness 3 (highest) for filtering noise
         self._last_transcript = ""
         self._record_thread: threading.Thread | None = None
+        self._running_thread = False
         self._continuous = False
+        self._cumulative_speech_time: float = 0.0  # Total time above energy threshold
+        self._last_speech_time: float | None = None  # Last chunk timestamp above threshold
         self._current_energy_db = -100.0
+        self._model_lock = threading.Lock()
 
         # Audio stream (shared or standalone)
         self._pyaudio_instance = None
@@ -92,23 +143,28 @@ class StreamingSTT:
         if self._model is not None:
             return
 
-        try:
-            from faster_whisper import WhisperModel
-            logger.info(
-                "Loading faster-whisper model: %s (device=%s, compute=%s)",
-                self.model_size, self.device, self.compute_type,
-            )
-            self._model = WhisperModel(
-                self.model_size,
-                device=self.device,
-                compute_type=self.compute_type,
-            )
-            logger.info("faster-whisper model loaded successfully.")
-        except Exception as e:
-            logger.error("Failed to load faster-whisper model: %s", e)
-            if self.on_error:
-                self.on_error(f"STT model load failed: {e}")
-            raise
+        # Prevent race condition when multiple threads call load_model() simultaneously
+        with self._model_lock:
+            if self._model is not None:
+                return  # Another thread loaded it while we waited
+            
+            try:
+                from faster_whisper import WhisperModel
+                logger.info(
+                    "Loading faster-whisper model: %s (device=%s, compute=%s)",
+                    self.model_size, self.device, self.compute_type,
+                )
+                self._model = WhisperModel(
+                    self.model_size,
+                    device=self.device,
+                    compute_type=self.compute_type,
+                )
+                logger.info("faster-whisper model loaded successfully.")
+            except Exception as e:
+                logger.error("Failed to load faster-whisper model: %s", e)
+                if self.on_error:
+                    self.on_error(f"STT model load failed: {e}")
+                raise
 
     # ── Recording ────────────────────────────────────────────────
 
@@ -123,31 +179,32 @@ class StreamingSTT:
             return
 
         self.load_model()
-        self._recording = True
         self._continuous = continuous
-        self._audio_buffer = bytearray()
+        with self._audio_lock:
+            self._audio_buffer = bytearray()
         self._silence_start = None
         self._speech_detected = False
         self._last_transcript = ""
 
-        self._record_thread = threading.Thread(
-            target=self._record_loop, daemon=True, name="stt-record"
-        )
-        self._record_thread.start()
-        logger.info("STT recording started.")
+        if self._record_thread is None or not self._record_thread.is_alive():
+            self._running_thread = True
+            self._record_thread = threading.Thread(
+                target=self._record_loop, daemon=True, name="stt-record"
+            )
+            self._record_thread.start()
+            
+        self._recording = True
+        logger.info("STT recording started (continuous=%s).", continuous)
 
     def stop_recording(self) -> str:
         """
         Stop recording and return the final transcript.
-        If there's buffered audio, transcribes it before returning.
+        Leaves the background thread and audio stream running.
         """
         self._recording = False
-        if self._record_thread and self._record_thread.is_alive():
-            self._record_thread.join(timeout=5.0)
-
         # Transcribe any remaining audio
         final_text = self._transcribe_buffer()
-        self._cleanup_stream()
+        # Do not cleanup stream here so it can be reused.
 
         if final_text and self.on_final_transcript:
             self.on_final_transcript(final_text)
@@ -183,7 +240,19 @@ class StreamingSTT:
         last_partial_time = time.time()
         record_start = time.time()
 
-        while self._recording:
+        while self._running_thread:
+            if not self._recording:
+                # Read and discard to prevent buffer overflow and stale data
+                try:
+                    self._stream.read(chunk_size, exception_on_overflow=False)
+                except Exception:
+                    pass
+                time.sleep(0.01)
+                # Reset timers while paused
+                last_partial_time = time.time()
+                record_start = time.time()
+                continue
+
             try:
                 raw_data = self._stream.read(chunk_size, exception_on_overflow=False)
                 audio_np = np.frombuffer(raw_data, dtype=np.int16)
@@ -191,7 +260,8 @@ class StreamingSTT:
                 with self._audio_lock:
                     self._audio_buffer.extend(raw_data)
 
-                # ── Energy-based speech/silence detection ────────
+                # ── Energy-based & WebRTC speech/silence detection ────────
+                now = time.time()
                 energy_db = self._compute_energy_db(audio_np)
                 self._current_energy_db = energy_db
                 
@@ -199,12 +269,30 @@ class StreamingSTT:
                 from core.performance_monitor import get_performance_monitor
                 get_performance_monitor().record_noise_level(energy_db)
                 
-                is_speech = energy_db > self.energy_silence_db
+                # Use WebRTC VAD for speech detection (much more accurate than raw energy)
+                # WebRTC VAD requires exactly 10ms, 20ms, or 30ms frames.
+                # chunk_size is 1600 (100ms). We split into three 30ms frames (480 samples each).
+                is_speech = False
+                try:
+                    for i in range(3):
+                        frame = raw_data[i*960:(i+1)*960]
+                        if len(frame) == 960 and self._vad.is_speech(frame, self.SAMPLE_RATE):
+                            is_speech = True
+                            break
+                except Exception:
+                    # Fallback to energy if VAD fails
+                    is_speech = energy_db > self.energy_silence_db
 
                 if is_speech:
-                    if not self._speech_detected:
+                    # Track cumulative time above speech threshold
+                    chunk_duration = chunk_size / (self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)  # ~0.1s
+                    self._cumulative_speech_time += chunk_duration
+                    self._last_speech_time = now
+                    
+                    # Only mark speech_detected after 0.2s of cumulative speech (lowered from 0.3s due to VAD accuracy)
+                    if not self._speech_detected and self._cumulative_speech_time >= 0.2:
                         self._speech_detected = True
-                        logger.info("Speech detected (energy=%.1f dB)", energy_db)
+                        logger.info("Speech detected (energy=%.1f dB, cumulative=%.1fs)", energy_db, self._cumulative_speech_time)
                         if self.on_speech_start:
                             self.on_speech_start()
                     self._silence_start = None
@@ -241,9 +329,12 @@ class StreamingSTT:
                         )
                         if self._continuous:
                             # In continuous mode, transcribe what we have, emit it, and clear buffer
-                            final_text = self._transcribe_buffer(final=True)
-                            if final_text and self.on_ambient_transcript:
-                                self.on_ambient_transcript(final_text)
+                            # Skip if speech was too short (< 0.5s) — likely noise
+                            speech_duration = now - record_start
+                            if speech_duration >= 0.5:
+                                final_text = self._transcribe_buffer(final=True)
+                                if final_text and self.on_ambient_transcript:
+                                    self.on_ambient_transcript(final_text)
                             
                             # Reset for next utterance
                             with self._audio_lock:
@@ -251,30 +342,67 @@ class StreamingSTT:
                             self._speech_detected = False
                             self._silence_start = None
                             self._last_transcript = ""
+                            self._cumulative_speech_time = 0.0
+                            self._last_speech_time = None
+                            record_start = time.time()  # Reset timer for next utterance
                         else:
                             self._recording = False
-                            break
-
+                            final_text = self._transcribe_buffer(final=True)
+                            
+                            if self.on_speech_end:
+                                self.on_speech_end()
+                                
+                            if final_text and self.on_final_transcript:
+                                self.on_final_transcript(final_text)
+                                
+                            with self._audio_lock:
+                                self._audio_buffer.clear()
+                            self._speech_detected = False
+                            self._silence_start = None
+                            self._last_transcript = ""
                 # ── Max recording timeout ────────────────────────
                 if now - record_start >= self.max_recording_seconds:
-                    logger.warning("Max recording time reached (%.0fs)", self.max_recording_seconds)
-                    self._recording = False
-                    break
+                    
+                    if self._continuous:
+                        # Only transcribe if there was genuine speech (not just ambient noise)
+                        if self._speech_detected and self._cumulative_speech_time >= 0.5:
+                            logger.warning("Max recording time reached (%.0fs) with %.1fs speech", self.max_recording_seconds, self._cumulative_speech_time)
+                            final_text = self._transcribe_buffer(final=True)
+                            if final_text and self.on_ambient_transcript:
+                                self.on_ambient_transcript(final_text)
+                        else:
+                            logger.debug("Max recording timeout — no real speech detected (cumulative=%.1fs), skipping transcription", self._cumulative_speech_time)
+                        
+                        with self._audio_lock:
+                            self._audio_buffer.clear()
+                        self._speech_detected = False
+                        self._silence_start = None
+                        self._last_transcript = ""
+                        self._cumulative_speech_time = 0.0
+                        self._last_speech_time = None
+                        record_start = time.time()
+                    else:
+                        self._recording = False
+                        
+                        final_text = self._transcribe_buffer(final=True)
+                        if self.on_speech_end:
+                            self.on_speech_end()
+                        if final_text and self.on_final_transcript:
+                            self.on_final_transcript(final_text)
+                            
+                        with self._audio_lock:
+                            self._audio_buffer.clear()
+                        self._speech_detected = False
+                        self._silence_start = None
+                        self._last_transcript = ""
 
             except Exception as e:
                 if self._recording:
                     logger.error("STT record loop error: %s", e)
                     time.sleep(0.1)
 
-        # Final transcription
-        final_text = self._transcribe_buffer(final=True)
+        # When thread exits completely
         self._cleanup_stream()
-
-        if self.on_speech_end:
-            self.on_speech_end()
-
-        if final_text and self.on_final_transcript:
-            self.on_final_transcript(final_text)
 
     def _get_adaptive_silence_threshold(self) -> float:
         """
@@ -309,21 +437,55 @@ class StreamingSTT:
     # ── Audio utilities ──────────────────────────────────────────
 
     def _init_audio(self):
-        """Open a microphone stream for recording."""
+        """Open a microphone stream for recording, supporting system default and fallback microphones."""
         if self._stream is not None:
             return
 
         import pyaudio
 
         self._pyaudio_instance = pyaudio.PyAudio()
-        self._stream = self._pyaudio_instance.open(
-            format=pyaudio.paInt16,
-            channels=self.CHANNELS,
-            rate=self.SAMPLE_RATE,
-            input=True,
-            frames_per_buffer=1600,
-        )
-        self._owns_stream = True
+
+        # 1. Try system default input device
+        try:
+            self._stream = self._pyaudio_instance.open(
+                format=pyaudio.paInt16,
+                channels=self.CHANNELS,
+                rate=self.SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=1600,
+            )
+            self._owns_stream = True
+            logger.info("Initialized default system microphone stream.")
+            return
+        except Exception as e:
+            logger.warning("Could not open default microphone: %s. Searching for available audio input devices...", e)
+
+        # 2. Iterate through all available audio input devices (headsets, headphones, USB mics, etc.)
+        try:
+            info = self._pyaudio_instance.get_host_api_info_by_index(0)
+            numdevices = info.get('deviceCount', 0)
+            for i in range(0, numdevices):
+                device_info = self._pyaudio_instance.get_device_info_by_host_api_device_index(0, i)
+                if device_info.get('maxInputChannels', 0) > 0:
+                    dev_name = device_info.get('name', f'Device {i}')
+                    try:
+                        self._stream = self._pyaudio_instance.open(
+                            format=pyaudio.paInt16,
+                            channels=self.CHANNELS,
+                            rate=self.SAMPLE_RATE,
+                            input=True,
+                            input_device_index=i,
+                            frames_per_buffer=1600,
+                        )
+                        self._owns_stream = True
+                        logger.info("Initialized fallback microphone stream: '%s' (index %d)", dev_name, i)
+                        return
+                    except Exception as ex:
+                        logger.debug("Failed to open microphone index %d (%s): %s", i, dev_name, ex)
+        except Exception as e:
+            logger.error("Audio device discovery error: %s", e)
+
+        raise RuntimeError("No working microphone (headset, default, USB, or system input) could be initialized.")
 
     def _cleanup_stream(self):
         """Close the audio stream if we own it."""
@@ -344,6 +506,29 @@ class StreamingSTT:
             except Exception:
                 pass
             self._pyaudio_instance = None
+
+    @staticmethod
+    def _collect_confident_segments(segments) -> list:
+        """Keep only segments the model is reasonably confident are real speech.
+
+        faster-whisper exposes ``no_speech_prob`` and ``avg_logprob`` per segment;
+        dropping high-no-speech / very-low-logprob segments removes most of the
+        phantom text Whisper produces on silence and noise.
+        """
+        kept = []
+        for seg in segments:
+            no_speech = getattr(seg, "no_speech_prob", 0.0) or 0.0
+            avg_logprob = getattr(seg, "avg_logprob", 0.0) or 0.0
+            if no_speech > 0.85:
+                logger.debug("[STT] Skipping segment (no_speech_prob=%.2f): %r",
+                             no_speech, seg.text)
+                continue
+            if avg_logprob < -1.2:
+                logger.debug("[STT] Skipping low-confidence segment (avg_logprob=%.2f): %r",
+                             avg_logprob, seg.text)
+                continue
+            kept.append(seg.text.strip())
+        return kept
 
     @staticmethod
     def _compute_energy_db(audio: np.ndarray) -> float:
@@ -398,7 +583,7 @@ class StreamingSTT:
                 
                 logger.info("Using Cloud STT (recognize_google) for zero-CPU transcription...")
                 result = recognizer.recognize_google(audio)
-                return result.strip()
+                return _clean_transcript(result)
                 
             except sr.UnknownValueError:
                 return ""
@@ -417,26 +602,44 @@ class StreamingSTT:
             # Convert raw bytes to float32 array for faster-whisper
             audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
 
-            segments, info = self._model.transcribe(
-                audio_np,
+            # Decoding params tuned for command accuracy and low hallucination:
+            #  - initial_prompt biases toward the assistant's vocabulary
+            #  - condition_on_previous_text=False stops runaway repetition loops
+            #  - no_speech/log_prob thresholds drop low-confidence garbage
+            #  - temperature=0 makes decoding deterministic
+            decode_kwargs = dict(
                 beam_size=5 if final else 1,
                 language="en",
-                vad_filter=True,
-                vad_parameters=dict(
-                    min_silence_duration_ms=500,
-                    speech_pad_ms=200,
-                ),
+                temperature=0.0,
+                initial_prompt=_STT_INITIAL_PROMPT,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.6,
+                log_prob_threshold=-1.0,
             )
-
-            text_parts = []
-            for segment in segments:
-                text_parts.append(segment.text.strip())
+            try:
+                segments, info = self._model.transcribe(
+                    audio_np,
+                    vad_filter=True,
+                    vad_parameters=dict(
+                        min_silence_duration_ms=500,
+                        speech_pad_ms=200,
+                    ),
+                    **decode_kwargs,
+                )
+                text_parts = self._collect_confident_segments(segments)
+            except Exception as vad_err:
+                logger.warning("vad_filter transcription error (%s), retrying with vad_filter=False", vad_err)
+                segments, info = self._model.transcribe(
+                    audio_np, vad_filter=False, **decode_kwargs,
+                )
+                text_parts = self._collect_confident_segments(segments)
 
             result = " ".join(text_parts).strip()
-            return result
+            return _clean_transcript(result)
 
         except Exception as e:
             logger.error("Transcription error: %s", e)
             if self.on_error:
                 self.on_error(f"Transcription failed: {e}")
             return ""
+

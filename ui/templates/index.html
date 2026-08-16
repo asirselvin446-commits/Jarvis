@@ -1,464 +1,374 @@
 <!DOCTYPE html>
-<html class="dark" lang="en"><head>
+<html lang="en">
+<head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>AETHER | Agentic Interface</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<title>J.A.R.V.I.S. — Command Center</title>
 <style>
-    body {
-        background-color: #050505;
-        color: #e3e2e2;
-        overflow: hidden;
-        font-family: 'Space Grotesk', sans-serif;
-    }
-    .glass-panel {
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
-        backdrop-filter: blur(20px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    .waveform-container { filter: drop-shadow(0 0 15px rgba(0, 242, 255, 0.2)); }
-    .waveform-listening { filter: drop-shadow(0 0 25px rgba(220, 184, 255, 0.4)); }
-    .waveform-processing { filter: drop-shadow(0 0 25px rgba(0, 242, 255, 0.4)); }
-    
-    .glow-dot {
-        box-shadow: 0 0 10px rgba(0, 242, 255, 0.6);
-        animation: pulse 3s infinite ease-in-out;
-    }
-    .glow-dot-speaking {
-        background-color: #dcb8ff !important;
-        box-shadow: 0 0 10px rgba(220, 184, 255, 0.6);
-    }
-    @keyframes pulse {
-        0%, 100% { opacity: 0.6; transform: scale(1); }
-        50% { opacity: 1; transform: scale(1.2); }
-    }
-    .noise-overlay {
-        position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; opacity: 0.02;
-        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
-    }
-    
-    /* Scrollbars */
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 4px; }
-    
-    /* Chat message entry animation */
-    .msg-enter { animation: msg-slide-in 0.3s ease-out; }
-    @keyframes msg-slide-in {
-        from { opacity: 0; transform: translateY(10px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-
-    /* Ambient VAD Animation */
-    .bar {
-        width: 2px;
-        background: #00dbe7;
-        border-radius: 2px;
-        transition: height 0.2s ease, background 0.3s ease;
-    }
-    .bar-speaking {
-        background: #dcb8ff;
-    }
-    .ws-disconnected { color: #ffb4ab; animation: blink 1s step-end infinite; }
-    @keyframes blink { 50% { opacity: 0; } }
-</style>
-<script id="tailwind-config">
-tailwind.config = {
-  darkMode: "class",
-  theme: {
-    extend: {
-      "colors": {
-              "primary-fixed-dim": "#00dbe7",
-              "primary": "#e1fdff",
-              "error": "#ffb4ab",
-              "surface-dim": "#121414",
-              "secondary": "#dcb8ff",
-      },
-      "fontFamily": {
-              "display-xl": ["Space Grotesk"],
-              "label-sm": ["Space Grotesk"]
-      },
-      "spacing": {
-              "margin-edge": "64px",
-              "section-gap": "128px",
-      }
-    }
+  /* ─── Design tokens ─────────────────────────────────────────── */
+  :root{
+    --bg:#060a12; --bg2:#0a0f1c;
+    --panel:rgba(13,20,34,.62); --panel-solid:#0d1424;
+    --border:rgba(0,229,255,.18); --border-hi:rgba(0,229,255,.45);
+    --cyan:#00e5ff; --cyan-dim:#5bd6e8; --purple:#b98cff;
+    --green:#2ee6a6; --amber:#ffcf5c; --red:#ff6b6b;
+    --txt:#e6f0f4; --muted:#8ba0b3; --faint:#5a6b7d;
+    --mono:ui-monospace,"Cascadia Code","Consolas",monospace;
+    --sans:system-ui,"Segoe UI",Roboto,sans-serif;
   }
-}
-</script>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:radial-gradient(1200px 800px at 50% -10%,#0d1830 0%,var(--bg) 60%) fixed;
+    color:var(--txt); font-family:var(--sans);
+    display:flex; flex-direction:column; overflow:hidden; user-select:none;
+  }
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-thumb{background:rgba(0,229,255,.28);border-radius:3px}
+  ::-webkit-scrollbar-thumb:hover{background:rgba(0,229,255,.6)}
+  .mono{font-family:var(--mono)}
+
+  /* ─── Header ─────────────────────────────────────────────────── */
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0 20px; height:58px; flex:0 0 auto;
+    background:rgba(6,10,18,.85); backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--border);
+  }
+  .brand{display:flex; align-items:center; gap:12px}
+  .brand .logo{
+    width:34px;height:34px;border-radius:50%;
+    border:2px solid var(--cyan); position:relative; flex:0 0 auto;
+    box-shadow:0 0 14px rgba(0,229,255,.5), inset 0 0 8px rgba(0,229,255,.4);
+    animation:spin 14s linear infinite;
+  }
+  .brand .logo::after{content:"";position:absolute;inset:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 12px var(--cyan)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .brand h1{font-size:16px;letter-spacing:3px;font-weight:700;color:var(--cyan)}
+  .brand p{font-size:10px;letter-spacing:2px;color:var(--faint);font-family:var(--mono)}
+
+  .pills{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11px}
+  .pill{display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;
+        background:var(--panel);border:1px solid var(--border);white-space:nowrap}
+  .pill .k{color:var(--faint);font-size:9px;letter-spacing:1px}
+  .pill .v{color:var(--txt);font-weight:600}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+  .dot.off{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+  /* ─── Layout ─────────────────────────────────────────────────── */
+  main{flex:1 1 auto; display:grid; grid-template-columns:1.35fr 1fr; gap:16px;
+       padding:16px; min-height:0}
+  .col{display:flex;flex-direction:column;gap:16px;min-height:0}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;
+         backdrop-filter:blur(16px); box-shadow:0 4px 26px rgba(0,0,0,.4)}
+  .panel-h{display:flex;align-items:center;justify-content:space-between;
+           padding:11px 15px;border-bottom:1px solid var(--border)}
+  .panel-h .title{display:flex;align-items:center;gap:8px;font-size:12px;letter-spacing:2px;
+                  font-weight:700;color:var(--cyan);font-family:var(--mono)}
+  .panel-h .sub{font-size:10px;color:var(--faint);font-family:var(--mono)}
+
+  /* ─── Conversation ───────────────────────────────────────────── */
+  #convo{flex:1 1 auto; overflow-y:auto; padding:16px; display:flex;
+         flex-direction:column; gap:12px; min-height:0}
+  .msg{max-width:82%; padding:10px 14px; border-radius:14px; font-size:14px;
+       line-height:1.5; animation:rise .25s ease}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1}}
+  .msg .who{font-size:9px;letter-spacing:1.5px;font-family:var(--mono);
+            opacity:.7;margin-bottom:3px;text-transform:uppercase}
+  .msg.user{align-self:flex-end;background:rgba(0,229,255,.12);
+            border:1px solid rgba(0,229,255,.32);border-bottom-right-radius:4px}
+  .msg.user .who{color:var(--cyan)}
+  .msg.jarvis{align-self:flex-start;background:rgba(185,140,255,.10);
+              border:1px solid rgba(185,140,255,.28);border-bottom-left-radius:4px}
+  .msg.jarvis .who{color:var(--purple)}
+  .msg.sys{align-self:center;background:transparent;border:1px dashed var(--border);
+           color:var(--muted);font-size:12px;font-family:var(--mono);max-width:92%}
+  .empty{margin:auto;text-align:center;color:var(--faint);font-family:var(--mono);font-size:13px}
+  .empty .big{font-size:15px;color:var(--muted);margin-bottom:6px}
+
+  /* ─── State orb ──────────────────────────────────────────────── */
+  .orb-wrap{display:flex;flex-direction:column;align-items:center;gap:14px;padding:22px 16px}
+  .orb{position:relative;width:150px;height:150px;display:flex;align-items:center;justify-content:center}
+  .orb .ring{position:absolute;border-radius:50%;border:2px solid var(--cyan);opacity:.5}
+  .orb .r1{inset:0;animation:pulse 3s ease-in-out infinite}
+  .orb .r2{inset:18px;border-color:var(--purple);animation:pulse 3s ease-in-out infinite .6s}
+  .orb .core{width:78px;height:78px;border-radius:50%;
+             background:radial-gradient(circle,rgba(0,229,255,.5),rgba(0,229,255,.05));
+             box-shadow:0 0 40px rgba(0,229,255,.5);display:flex;align-items:center;justify-content:center}
+  @keyframes pulse{0%,100%{transform:scale(.92);opacity:.4}50%{transform:scale(1.04);opacity:.85}}
+  .eq{display:flex;align-items:flex-end;gap:3px;height:26px}
+  .eq span{width:4px;background:var(--cyan);border-radius:2px;box-shadow:0 0 6px var(--cyan);height:6px}
+  .state-txt{text-align:center}
+  .state-txt .s{font-size:20px;letter-spacing:5px;font-weight:700;color:var(--cyan);font-family:var(--mono)}
+  .state-txt .d{font-size:10px;letter-spacing:1px;color:var(--muted);font-family:var(--mono);margin-top:3px}
+  /* state color themes applied via body[data-state] */
+  body[data-state="listening"] .orb .ring,body[data-state="listening"] .state-txt .s{border-color:var(--green);color:var(--green)}
+  body[data-state="listening"] .orb .core{box-shadow:0 0 44px rgba(46,230,166,.6);background:radial-gradient(circle,rgba(46,230,166,.5),transparent)}
+  body[data-state="listening"] .eq span{background:var(--green);box-shadow:0 0 6px var(--green);animation:eq .5s ease-in-out infinite alternate}
+  body[data-state="processing"] .orb .ring,body[data-state="processing"] .state-txt .s{border-color:var(--purple);color:var(--purple)}
+  body[data-state="processing"] .orb .core{box-shadow:0 0 44px rgba(185,140,255,.6)}
+  body[data-state="speaking"] .state-txt .s{color:var(--cyan)}
+  body[data-state="speaking"] .eq span{animation:eq .32s ease-in-out infinite alternate}
+  @keyframes eq{to{height:26px}}
+  .eq span:nth-child(1){animation-delay:0s}.eq span:nth-child(2){animation-delay:.1s}
+  .eq span:nth-child(3){animation-delay:.05s}.eq span:nth-child(4){animation-delay:.15s}
+  .eq span:nth-child(5){animation-delay:.08s}
+  .partial{min-height:20px;text-align:center;font-family:var(--mono);font-size:13px;
+           color:var(--cyan-dim);font-style:italic;padding:0 12px;opacity:.9}
+
+  /* ─── Agent activity feed ────────────────────────────────────── */
+  #activity{flex:1 1 auto;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:7px;min-height:80px}
+  .act{display:flex;gap:9px;align-items:flex-start;font-family:var(--mono);font-size:12px;
+       padding:7px 10px;border-radius:9px;background:rgba(255,255,255,.03);
+       border-left:2px solid var(--faint);animation:rise .2s ease}
+  .act .ic{font-size:13px;line-height:1.3}
+  .act .tx{color:var(--muted);word-break:break-word}
+  .act .tx b{color:var(--txt);font-weight:600}
+  .act.plan{border-left-color:var(--purple)} .act.plan .ic{color:var(--purple)}
+  .act.tool{border-left-color:var(--cyan)} .act.tool .ic{color:var(--cyan)}
+  .act.block{border-left-color:var(--red)} .act.block .tx{color:var(--red)}
+  .act.done{border-left-color:var(--green)} .act.done .ic{color:var(--green)}
+  .progress{height:4px;background:rgba(255,255,255,.08);border-radius:2px;margin:0 12px 12px;overflow:hidden;display:none}
+  .progress .bar{height:100%;width:0;background:var(--cyan);box-shadow:0 0 8px var(--cyan);transition:width .3s}
+
+  /* ─── Vitals ─────────────────────────────────────────────────── */
+  .vitals{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 14px}
+  .vital .lbl{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:5px}
+  .vital .lbl b{color:var(--txt)}
+  .meter{height:6px;background:rgba(255,255,255,.07);border-radius:3px;overflow:hidden}
+  .meter i{display:block;height:100%;width:0;background:var(--cyan);box-shadow:0 0 6px var(--cyan);transition:width .5s,background .5s}
+
+  /* ─── Command bar ────────────────────────────────────────────── */
+  footer{flex:0 0 auto;padding:12px 16px 16px;display:flex;justify-content:center}
+  .cmdbar{display:flex;align-items:center;gap:12px;width:100%;max-width:900px;height:56px;
+          padding:0 10px 0 12px;border-radius:28px;background:var(--panel-solid);
+          border:1px solid var(--border-hi);box-shadow:0 0 24px rgba(0,229,255,.15)}
+  .iconbtn{width:40px;height:40px;border-radius:50%;border:none;cursor:pointer;
+           display:flex;align-items:center;justify-content:center;transition:.2s;flex:0 0 auto}
+  .mic{background:rgba(0,229,255,.14);color:var(--cyan)}
+  .mic:hover{background:rgba(0,229,255,.28)}
+  .mic.on{background:rgba(255,107,107,.2);color:var(--red);box-shadow:0 0 14px rgba(255,107,107,.5)}
+  .send{background:var(--cyan);color:#04202a}
+  .send:hover{background:#66eeff}
+  #cmd{flex:1 1 auto;background:transparent;border:none;outline:none;color:var(--txt);
+       font-family:var(--mono);font-size:15px;letter-spacing:.5px}
+  #cmd::placeholder{color:var(--faint)}
+  svg{width:20px;height:20px;fill:currentColor;display:block}
+  @media(max-width:920px){main{grid-template-columns:1fr}.col.right{display:none}}
+</style>
 </head>
-<body class="bg-surface-dim selection:bg-primary/20 text-white select-none">
-<div class="noise-overlay z-0"></div>
+<body data-state="online">
 
-<!-- Background Glow -->
-<div class="fixed inset-0 pointer-events-none overflow-hidden z-0">
-  <div class="absolute -top-[20%] -left-[10%] w-[60%] h-[60%] rounded-full bg-primary-fixed-dim/5 blur-[120px]"></div>
-  <div class="absolute -bottom-[20%] -right-[10%] w-[50%] h-[50%] rounded-full bg-primary-fixed-dim/5 blur-[100px]"></div>
-</div>
-
-<!-- Header -->
-<header class="flex justify-between items-center w-full px-8 py-6 fixed top-0 z-50 bg-transparent">
-  <div class="text-[20px] font-medium tracking-[0.2em] text-primary-fixed-dim drop-shadow-[0_0_8px_rgba(0,219,231,0.4)] flex items-center gap-3">
-    <span class="material-symbols-outlined text-[24px]">memory</span>
-    AETHER CORE
-  </div>
-  <div class="flex items-center gap-6">
-    <button id="btn-mic" class="text-primary-fixed-dim hover:text-primary transition-all p-2 rounded-full border border-primary-fixed-dim/20 hover:bg-primary-fixed-dim/10 flex items-center justify-center cursor-pointer">
-        <span id="mic-icon" class="material-symbols-outlined">mic</span>
-    </button>
-    <span id="ws-indicator" class="material-symbols-outlined text-[16px] ws-disconnected" title="WebSocket">sensors</span>
-  </div>
-</header>
-
-<!-- Left Sidebar (Static Aesthetics) -->
-<aside class="fixed left-0 top-0 h-full pt-32 pb-8 flex flex-col justify-between z-40 bg-white/[0.02] backdrop-blur-3xl border-r border-white/5 w-64 px-8">
-  <div class="flex flex-col gap-12">
-    <div class="space-y-1">
-      <h2 class="text-[24px] font-light text-primary">J.A.R.V.I.S.</h2>
-      <p class="text-[10px] tracking-[0.2em] opacity-50 uppercase">Neural OS Active</p>
-    </div>
-    <nav class="flex flex-col gap-6">
-      <a class="text-primary-fixed-dim border-l-2 border-primary-fixed-dim pl-4 flex items-center gap-4 transition-all uppercase tracking-[0.1em] text-[12px]" href="#">
-        <span class="material-symbols-outlined text-[18px]">psychology</span>
-        Cognition
-      </a>
-      <a class="text-white/50 pl-4 flex items-center gap-4 hover:text-primary transition-all uppercase tracking-[0.1em] text-[12px]" href="#">
-        <span class="material-symbols-outlined text-[18px]">history_edu</span>
-        Archive
-      </a>
-      <a class="text-white/50 pl-4 flex items-center gap-4 hover:text-primary transition-all uppercase tracking-[0.1em] text-[12px]" href="#">
-        <span class="material-symbols-outlined text-[18px]">tune</span>
-        Config
-      </a>
-    </nav>
-  </div>
-</aside>
-
-<!-- Main Canvas -->
-<main class="ml-64 mr-[400px] h-screen relative flex flex-col items-center justify-center z-10">
-  <div class="flex flex-col items-center justify-center gap-16 mb-24">
-    <!-- Waveform -->
-    <div class="relative w-96 h-32 flex items-center justify-center gap-[2px] waveform-container" id="visualizer">
-      <!-- Bars via JS -->
-    </div>
-    <!-- Status Text -->
-    <div class="text-center space-y-4">
-      <div class="flex items-center justify-center gap-3">
-        <div id="status-led" class="w-2 h-2 rounded-full bg-primary-fixed-dim glow-dot"></div>
-        <span id="status-text" class="text-[10px] tracking-[0.4em] text-primary-fixed-dim uppercase">AMBIENT VAD READY</span>
-      </div>
-      <h1 id="pipeline-text" class="text-[64px] font-light text-primary/80 tracking-wide">Aether</h1>
-    </div>
-  </div>
-</main>
-
-<!-- Right Sidebar (Repurposed as Chat Log) -->
-<div class="fixed right-8 top-1/2 -translate-y-1/2 w-[350px] h-[600px] glass-panel rounded-xl flex flex-col z-40">
-  <div class="flex justify-between items-center p-6 border-b border-white/5 bg-black/20 rounded-t-xl">
-    <span class="text-[10px] tracking-[0.2em] opacity-40 uppercase">TERMINAL LOG</span>
-    <button id="btn-clear" class="material-symbols-outlined text-[16px] opacity-40 hover:opacity-100 hover:text-primary-fixed-dim transition-all cursor-pointer">delete_sweep</button>
-  </div>
-  
-  <div id="chat-log" class="flex-grow overflow-y-auto p-6 relative">
-    <div id="chat-messages" class="space-y-4">
-      <div class="msg-enter flex flex-col gap-1 border-l border-primary-fixed-dim/40 pl-3">
-        <span class="text-[9px] font-bold text-primary-fixed-dim tracking-[0.15em] uppercase">System</span>
-        <p class="text-[13px] text-white/80 font-mono tracking-tight leading-relaxed">J.A.R.V.I.S. Aether UI initialized. Say <span class="text-primary font-bold">"Hey Jarvis"</span> to begin.</p>
+  <header>
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1>J.A.R.V.I.S.</h1>
+        <p id="tagline">NEURAL COMMAND CENTER</p>
       </div>
     </div>
-  </div>
-</div>
+    <div class="pills">
+      <div class="pill"><span id="net-dot" class="dot"></span><div><div class="k">AI CORE</div><div class="v" id="provider">—</div></div></div>
+      <div class="pill"><div><div class="k">CPU</div><div class="v" id="cpu">0%</div></div></div>
+      <div class="pill"><div><div class="k">RAM</div><div class="v" id="ram">0%</div></div></div>
+      <div class="pill"><div><div class="k">TOOLS</div><div class="v" id="tools">—</div></div></div>
+    </div>
+  </header>
 
-<!-- Bottom Footer (Input & Live Transcript) -->
-<footer class="fixed bottom-0 left-0 w-full pl-[288px] pr-8 py-4 flex justify-between items-center z-50 backdrop-blur-md border-t border-white/5 bg-transparent">
-  
-  <div class="flex-1 max-w-xl flex items-center gap-4">
-    <!-- Live Transcript -->
-    <div id="live-transcript" class="hidden flex items-center gap-3 flex-1 overflow-hidden">
-      <span class="w-1.5 h-1.5 bg-primary-fixed-dim rounded-full animate-pulse flex-shrink-0"></span>
-      <span id="live-transcript-text" class="text-[12px] font-mono text-primary-fixed-dim truncate opacity-80 uppercase tracking-wider"></span>
+  <main>
+    <!-- LEFT: conversation -->
+    <div class="col">
+      <div class="panel" style="flex:1 1 auto;display:flex;flex-direction:column;min-height:0">
+        <div class="panel-h">
+          <div class="title">▸ CONVERSATION</div>
+          <div class="sub" id="convo-sub">say “Hey Jarvis” or type below</div>
+        </div>
+        <div id="convo">
+          <div class="empty">
+            <div class="big">Systems online.</div>
+            <div>Say <b style="color:var(--cyan)">“Hey Jarvis”</b> or type a command to begin.</div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- Command Input -->
-    <div id="input-container" class="flex-1 flex items-center gap-2 glass-panel rounded-md px-4 py-2 opacity-50 focus-within:opacity-100 transition-opacity">
-      <input id="command-input" class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[12px] font-mono text-primary placeholder:text-white/20" placeholder="Agentic override command..." type="text" autocomplete="off" />
-      <button id="send-btn" class="material-symbols-outlined text-[16px] text-white/40 hover:text-primary-fixed-dim cursor-pointer">send</button>
-    </div>
-  </div>
+    <!-- RIGHT: orb + activity + vitals -->
+    <div class="col right">
+      <div class="panel">
+        <div class="orb-wrap">
+          <div class="orb">
+            <div class="ring r1"></div><div class="ring r2"></div>
+            <div class="core"><div class="eq"><span></span><span></span><span></span><span></span><span></span></div></div>
+          </div>
+          <div class="state-txt">
+            <div class="s" id="state">ONLINE</div>
+            <div class="d" id="state-sub">all subsystems nominal</div>
+          </div>
+          <div class="partial" id="partial"></div>
+        </div>
+      </div>
 
-  <div class="flex gap-8 text-[10px] font-mono tracking-widest text-white/30 uppercase pl-8">
-    <span>LATENCY: 12ms</span>
-    <span>UPTIME: 99.9%</span>
-  </div>
-</footer>
+      <div class="panel" style="flex:1 1 auto;display:flex;flex-direction:column;min-height:0">
+        <div class="panel-h">
+          <div class="title">▸ AGENT ACTIVITY</div>
+          <div class="sub" id="act-sub">live tool execution</div>
+        </div>
+        <div id="activity">
+          <div class="act"><span class="ic">◦</span><span class="tx">Waiting for a command…</span></div>
+        </div>
+        <div class="progress" id="progress"><div class="bar" id="progress-bar"></div></div>
+      </div>
+
+      <div class="panel">
+        <div class="vitals">
+          <div class="vital"><div class="lbl">CPU LOAD <b id="cpu2">0%</b></div><div class="meter"><i id="cpu-bar"></i></div></div>
+          <div class="vital"><div class="lbl">MEMORY <b id="ram2">0%</b></div><div class="meter"><i id="ram-bar"></i></div></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="cmdbar">
+      <button class="iconbtn mic" id="mic" title="Toggle voice listening" onclick="toggleMic()">
+        <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+      </button>
+      <input id="cmd" placeholder="Speak or type a command…" autocomplete="off"
+             onkeydown="if(event.key==='Enter')send()"/>
+      <button class="iconbtn send" title="Send" onclick="send()">
+        <svg viewBox="0 0 24 24"><path d="M3 20.5v-6l8-2.5-8-2.5v-6l19 8.5-19 8.5Z"/></svg>
+      </button>
+    </div>
+  </footer>
 
 <script>
-// ═══════════════════════════════════════════════════════════════
-// UI Animation & Setup
-// ═══════════════════════════════════════════════════════════════
-const visualizer = document.getElementById('visualizer');
-const barCount = 45;
-const bars = [];
-let pipelineState = 'idle';
-let pipelineRunning = false;
+(function(){
+  "use strict";
+  let ws=null, listening=false, hasMsg=false;
+  const $=id=>document.getElementById(id);
 
-// Generate bars
-for (let i = 0; i < barCount; i++) {
-    const bar = document.createElement('div');
-    bar.className = 'bar';
-    const baseHeight = 4 + Math.random() * 8;
-    bar.style.height = baseHeight + 'px';
-    bar.style.opacity = (0.1 + (i / barCount) * 0.9).toString();
-    visualizer.appendChild(bar);
-    bars.push({ el: bar, base: baseHeight, noiseOffset: i * 0.5 });
-}
-
-function animateBars() {
-    let multiplier = 1;
-    if (pipelineState === 'listening' || pipelineState === 'follow_up') multiplier = 6;
-    if (pipelineState === 'processing') multiplier = 3;
-    if (pipelineState === 'speaking') multiplier = 5;
-
-    bars.forEach((bar) => {
-        const speed = pipelineState === 'ambient' ? 0.002 : 0.01;
-        const noise = Math.sin(Date.now() * speed + bar.noiseOffset) * 10 * multiplier;
-        const dynamicHeight = Math.max(4, bar.base + noise);
-        bar.el.style.height = dynamicHeight + 'px';
-    });
-    requestAnimationFrame(animateBars);
-}
-animateBars();
-
-// ═══════════════════════════════════════════════════════════════
-// WebSocket Logic
-// ═══════════════════════════════════════════════════════════════
-const input = document.getElementById('command-input');
-const sendBtn = document.getElementById('send-btn');
-const micBtn = document.getElementById('btn-mic');
-const micIcon = document.getElementById('mic-icon');
-const clearBtn = document.getElementById('btn-clear');
-const chatMessages = document.getElementById('chat-messages');
-const chatLog = document.getElementById('chat-log');
-const statusLed = document.getElementById('status-led');
-const statusText = document.getElementById('status-text');
-const pipelineText = document.getElementById('pipeline-text');
-const wsIndicator = document.getElementById('ws-indicator');
-const liveTranscript = document.getElementById('live-transcript');
-const liveTranscriptText = document.getElementById('live-transcript-text');
-const inputContainer = document.getElementById('input-container');
-
-let ws = null;
-let wsReconnectTimer = null;
-
-function scrollToBottom() {
-  requestAnimationFrame(() => { chatLog.scrollTop = chatLog.scrollHeight; });
-}
-
-function addMessage(sender, text, type = 'system') {
-  const msg = document.createElement('div');
-  msg.className = 'msg-enter flex flex-col gap-1 border-l pl-3 py-1';
-  
-  let borderColor, labelColor, textColor;
-  switch(type) {
-    case 'user':
-      borderColor = 'border-white/30';
-      labelColor = 'text-white/60';
-      textColor = 'text-white/90';
-      break;
-    case 'error':
-      borderColor = 'border-error/40';
-      labelColor = 'text-error';
-      textColor = 'text-error/90';
-      break;
-    default:
-      borderColor = 'border-primary-fixed-dim/40';
-      labelColor = 'text-primary-fixed-dim';
-      textColor = 'text-primary/90';
+  /* ── WebSocket with auto-reconnect ── */
+  function connect(){
+    const proto=location.protocol==="https:"?"wss:":"ws:";
+    try{
+      ws=new WebSocket(`${proto}//${location.host}/ws`);
+      ws.onopen=()=>setState("online");
+      ws.onmessage=e=>{ try{handle(JSON.parse(e.data));}catch(_){} };
+      ws.onclose=()=>{ setState("offline"); setTimeout(connect,2500); };
+      ws.onerror=()=>{ try{ws.close();}catch(_){} };
+    }catch(_){ setTimeout(connect,2500); }
   }
 
-  msg.classList.add(borderColor);
-  msg.innerHTML = `
-    <span class="text-[9px] font-bold ${labelColor} tracking-[0.15em] uppercase">${sender}</span>
-    <p class="text-[13px] ${textColor} font-mono tracking-tight leading-relaxed whitespace-pre-wrap">${text}</p>
-  `;
-  chatMessages.appendChild(msg);
-  scrollToBottom();
-  return msg;
-}
-
-function setPipelineState(state) {
-  pipelineState = state;
-  
-  const resetColors = () => {
-      visualizer.classList.remove('waveform-listening', 'waveform-processing');
-      statusLed.classList.remove('glow-dot-speaking');
-      bars.forEach(b => b.el.classList.remove('bar-speaking'));
-  };
-  
-  resetColors();
-
-  switch(state) {
-    case 'ambient':
-      statusText.textContent = 'AMBIENT VAD READY';
-      pipelineText.textContent = 'Aether';
-      pipelineText.style.opacity = '0.3';
-      micIcon.textContent = 'mic';
-      hideLiveTranscript();
-      break;
-
-    case 'listening':
-      statusText.textContent = 'LISTENING';
-      pipelineText.textContent = 'Listening...';
-      pipelineText.style.opacity = '0.8';
-      visualizer.classList.add('waveform-listening');
-      micIcon.textContent = 'hearing';
-      break;
-
-    case 'processing':
-      statusText.textContent = 'PROCESSING';
-      pipelineText.textContent = 'Processing...';
-      pipelineText.style.opacity = '0.8';
-      visualizer.classList.add('waveform-processing');
-      micIcon.textContent = 'neurology';
-      hideLiveTranscript();
-      break;
-
-    case 'speaking':
-      statusText.textContent = 'SPEAKING / FULL-DUPLEX READY';
-      pipelineText.textContent = 'Speaking...';
-      pipelineText.style.opacity = '0.8';
-      statusLed.classList.add('glow-dot-speaking');
-      bars.forEach(b => b.el.classList.add('bar-speaking'));
-      micIcon.textContent = 'volume_up';
-      break;
-
-    case 'follow_up':
-      statusText.textContent = 'AWAITING INPUT';
-      pipelineText.textContent = 'Listening...';
-      pipelineText.style.opacity = '0.8';
-      visualizer.classList.add('waveform-listening');
-      micIcon.textContent = 'hearing';
-      break;
-      
-    case 'idle':
-    default:
-      statusText.textContent = 'SYSTEM IDLE';
-      pipelineText.textContent = 'Aether';
-      pipelineText.style.opacity = '0.3';
-      micIcon.textContent = 'mic_off';
-      hideLiveTranscript();
-  }
-}
-
-function showLiveTranscript(text) {
-  liveTranscriptText.textContent = text;
-  liveTranscript.classList.remove('hidden');
-  inputContainer.classList.add('hidden'); // Hide input while listening
-}
-
-function hideLiveTranscript() {
-  liveTranscript.classList.add('hidden');
-  inputContainer.classList.remove('hidden');
-}
-
-function connectWebSocket() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${protocol}//${window.location.host}/ws`;
-
-  ws = new WebSocket(url);
-  ws.onopen = () => {
-    wsIndicator.classList.remove('ws-disconnected');
-    wsIndicator.classList.add('text-primary-fixed-dim');
-    wsIndicator.title = 'WebSocket: Connected';
-    ws.send(JSON.stringify({ type: 'start_pipeline' }));
-    pipelineRunning = true;
-    setPipelineState('ambient');
-  };
-
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      switch(data.type) {
-        case 'state_change': setPipelineState(data.state); break;
-        case 'partial_transcript': showLiveTranscript(data.text); break;
-        case 'final_transcript': 
-          hideLiveTranscript(); 
-          if(data.text) addMessage('You', data.text, 'user'); 
-          break;
-        case 'response': addMessage('Aether', data.text, 'system'); break;
-        case 'error': addMessage('System Error', data.error, 'error'); break;
-      }
-    } catch(e) {}
-  };
-
-  ws.onclose = () => {
-    wsIndicator.classList.add('ws-disconnected');
-    wsIndicator.classList.remove('text-primary-fixed-dim');
-    wsIndicator.title = 'WebSocket: Disconnected';
-    if (!wsReconnectTimer) {
-      wsReconnectTimer = setTimeout(() => { wsReconnectTimer = null; connectWebSocket(); }, 2000);
-    }
-  };
-}
-
-function wsSend(data) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
-}
-
-async function sendCommand(text) {
-  if (!text.trim()) return;
-  input.value = ''; input.focus();
-  addMessage('You', text, 'user');
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    wsSend({ type: 'text_command', text: text });
-  } else {
-    // HTTP fallback
-    addMessage('System', 'Processing command (HTTP fallback)...', 'system');
-    try {
-        const res = await fetch('/api/command', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: text })
-        });
-        const data = await res.json();
-        if (data.success) {
-            addMessage(`Aether`, data.response || 'Task completed.', 'system');
-        } else {
-            addMessage('System Error', data.response || 'Unknown error occurred.', 'error');
-        }
-    } catch (e) {
-        addMessage('System Error', 'Failed to reach Neural OS.', 'error');
+  function handle(m){
+    switch(m.type){
+      case "state_change": setState(m.state); break;
+      case "partial_transcript": $("partial").textContent=m.text?`“${m.text}”`:""; break;
+      case "final_transcript":
+        if(m.text){ addMsg("user",m.text); $("partial").textContent=""; }
+        break;
+      case "response": if(m.text) addMsg("jarvis",m.text); break;
+      case "error": addActivity("block","⛔",`Error: ${m.error||"unknown"}`); break;
+      case "system_telemetry": telemetry(m); break;
+      case "bus_event": busEvent(m); break;
     }
   }
-}
 
-sendBtn.addEventListener('click', () => sendCommand(input.value));
-input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); sendCommand(input.value); }
-});
-
-clearBtn.addEventListener('click', () => { chatMessages.innerHTML = ''; });
-
-micBtn.addEventListener('click', () => {
-  if (pipelineState === 'speaking') {
-    wsSend({ type: 'interrupt' });
-  } else if (!pipelineRunning) {
-    wsSend({ type: 'start_pipeline' }); pipelineRunning = true;
-  } else {
-    wsSend({ type: 'stop_pipeline' }); pipelineRunning = false; setPipelineState('idle');
+  /* ── State orb ── */
+  const SUBS={online:"all subsystems nominal",listening:"capturing audio…",
+    processing:"reasoning & orchestrating…",speaking:"responding…",
+    follow_up:"listening for follow-up…",offline:"reconnecting to core…",ambient:"standing by — say “Jarvis”"};
+  function setState(s){
+    s=(s||"online").toLowerCase();
+    const norm=(s==="ambient")?"online":s;
+    document.body.dataset.state=norm;
+    $("state").textContent=(s==="follow_up"?"FOLLOW-UP":s.toUpperCase());
+    $("state-sub").textContent=SUBS[s]||"";
+    const off=(s==="offline");
+    $("net-dot").classList.toggle("off",off);
+    if(norm!=="listening") { /* keep mic button synced to real pipeline only on explicit toggle */ }
   }
-});
 
-document.addEventListener('keydown', (e) => {
-  if (e.code === 'Escape') wsSend({ type: 'interrupt' });
-});
+  /* ── Conversation ── */
+  function addMsg(who,text){
+    const c=$("convo");
+    if(!hasMsg){ c.innerHTML=""; hasMsg=true; }
+    const d=document.createElement("div");
+    d.className=`msg ${who}`;
+    const label=who==="user"?"You":(who==="jarvis"?"Jarvis":"System");
+    d.innerHTML=`<div class="who">${label}</div><div class="bd"></div>`;
+    d.querySelector(".bd").textContent=text;
+    c.appendChild(d); c.scrollTop=c.scrollHeight;
+  }
 
-input.focus();
-connectWebSocket();
+  /* ── Agent activity feed ── */
+  function addActivity(cls,icon,html){
+    const a=$("activity");
+    if(a.dataset.fresh!=="1"){ a.innerHTML=""; a.dataset.fresh="1"; }
+    const d=document.createElement("div");
+    d.className=`act ${cls}`;
+    d.innerHTML=`<span class="ic">${icon}</span><span class="tx">${html}</span>`;
+    a.appendChild(d);
+    while(a.children.length>40) a.removeChild(a.firstChild);
+    a.scrollTop=a.scrollHeight;
+  }
+  function esc(s){return String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+
+  function busEvent(m){
+    const p=m.payload||{}, topic=m.topic;
+    if(topic==="agentic_start"){
+      addActivity("plan","🧠",`Planning: <b>${esc(p.goal)}</b>`);
+    }else if(topic==="tool_executed"){
+      addActivity("tool","⚙",`Ran <b>${esc(p.tool)}</b>`);
+    }else if(topic==="agentic_blocked"){
+      addActivity("block","⛔",`Blocked <b>${esc(p.tool)}</b> — needs your confirmation`);
+    }else if(topic==="task_execute_automation"){
+      const pct=parseInt(p.percent||0,10);
+      const pr=$("progress"), bar=$("progress-bar");
+      pr.style.display="block"; bar.style.width=pct+"%";
+      $("act-sub").textContent=esc(p.status||"");
+      if(pct>=100) setTimeout(()=>{pr.style.display="none";bar.style.width="0";$("act-sub").textContent="live tool execution";},1500);
+    }
+  }
+
+  /* ── Telemetry ── */
+  function telemetry(m){
+    if(m.cpu!=null){ $("cpu").textContent=Math.round(m.cpu)+"%"; $("cpu2").textContent=Math.round(m.cpu)+"%"; meter("cpu-bar",m.cpu); }
+    if(m.ram!=null){ $("ram").textContent=Math.round(m.ram)+"%"; $("ram2").textContent=Math.round(m.ram)+"%"; meter("ram-bar",m.ram); }
+    if(m.provider){ $("provider").textContent=m.provider; }
+    if(m.online!=null){ $("net-dot").classList.toggle("off",!m.online); }
+  }
+  function meter(id,v){
+    const el=$(id); el.style.width=Math.min(100,v)+"%";
+    el.style.background=v>85?"var(--red)":v>60?"var(--amber)":"var(--cyan)";
+    el.style.boxShadow=`0 0 6px ${v>85?"var(--red)":v>60?"var(--amber)":"var(--cyan)"}`;
+  }
+
+  /* ── Actions ── */
+  window.send=function(){
+    const i=$("cmd"), t=i.value.trim();
+    if(!t) return;
+    i.value="";
+    addMsg("user",t);
+    fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({text:t})}).catch(()=>addActivity("block","⛔","Failed to reach core."));
+  };
+  window.toggleMic=function(){
+    listening=!listening;
+    $("mic").classList.toggle("on",listening);
+    fetch(`/api/pipeline/${listening?"start":"stop"}`,{method:"POST"}).catch(()=>{});
+    addActivity("tool", listening?"🎙":"⏹", listening?"Voice listening <b>enabled</b>":"Voice listening <b>paused</b>");
+  };
+
+  /* ── Boot ── */
+  async function bootStatus(){
+    try{
+      const r=await fetch("/api/status"); const d=await r.json();
+      if(d.tools_count) $("tools").textContent=d.tools_count;
+      if(d.cpu_percent!=null) telemetry({cpu:d.cpu_percent,ram:d.ram_percent});
+    }catch(_){}
+  }
+  connect(); bootStatus();
+})();
 </script>
 </body>
 </html>
