@@ -312,6 +312,35 @@ def pipeline_state():
         return jsonify({"state": "unknown", "error": str(e)})
 
 
+@app.route("/api/emergency_stop", methods=["POST"])
+def emergency_stop():
+    """Engage the emergency stop: halt any running agentic task + stop TTS."""
+    try:
+        from core.control import get_control_plane
+        get_control_plane().request_stop("ui button")
+        # Also interrupt any in-progress speech so it stops talking immediately.
+        try:
+            _get_pipeline().interrupt()
+        except Exception:
+            pass
+        _broadcast({"type": "bus_event", "topic": "emergency_stop",
+                    "sender": "ui", "payload": {"status": "stopped"}})
+        return jsonify({"success": True, "status": "stopped"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/audit", methods=["GET"])
+def audit_log():
+    """Return the most recent audited tool executions (secrets redacted)."""
+    try:
+        from core.control import get_control_plane
+        n = int(request.args.get("n", 20))
+        return jsonify({"success": True, "records": get_control_plane().tail_audit(n)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
 @app.route("/api/pipeline/interrupt", methods=["POST"])
 def pipeline_interrupt():
     """Interrupt current operation (stop TTS, cancel listening)."""

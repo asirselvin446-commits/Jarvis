@@ -150,6 +150,8 @@
   .mic.on{background:rgba(255,107,107,.2);color:var(--red);box-shadow:0 0 14px rgba(255,107,107,.5)}
   .send{background:var(--cyan);color:#04202a}
   .send:hover{background:#66eeff}
+  .stop{background:rgba(255,107,107,.16);color:var(--red)}
+  .stop:hover{background:rgba(255,107,107,.32);box-shadow:0 0 14px rgba(255,107,107,.5)}
   #cmd{flex:1 1 auto;background:transparent;border:none;outline:none;color:var(--txt);
        font-family:var(--mono);font-size:15px;letter-spacing:.5px}
   #cmd::placeholder{color:var(--faint)}
@@ -232,6 +234,9 @@
     <div class="cmdbar">
       <button class="iconbtn mic" id="mic" title="Toggle voice listening" onclick="toggleMic()">
         <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+      </button>
+      <button class="iconbtn stop" id="stop" title="Emergency stop — halt all tasks" onclick="emergencyStop()">
+        <svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z"/></svg>
       </button>
       <input id="cmd" placeholder="Speak or type a command…" autocomplete="off"
              onkeydown="if(event.key==='Enter')send()"/>
@@ -321,6 +326,8 @@
       addActivity("tool","⚙",`Ran <b>${esc(p.tool)}</b>`);
     }else if(topic==="agentic_blocked"){
       addActivity("block","⛔",`Blocked <b>${esc(p.tool)}</b> — needs your confirmation`);
+    }else if(topic==="emergency_stop"){
+      addActivity("block","⛔","<b>Emergency stop engaged</b> — all tasks halted");
     }else if(topic==="task_execute_automation"){
       const pct=parseInt(p.percent||0,10);
       const pr=$("progress"), bar=$("progress-bar");
@@ -351,6 +358,11 @@
     addMsg("user",t);
     fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({text:t})}).catch(()=>addActivity("block","⛔","Failed to reach core."));
+  };
+  window.emergencyStop=function(){
+    fetch("/api/emergency_stop",{method:"POST"}).catch(()=>{});
+    addActivity("block","⛔","<b>EMERGENCY STOP</b> — halting all tasks");
+    setState("online");
   };
   window.toggleMic=function(){
     listening=!listening;

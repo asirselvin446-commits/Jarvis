@@ -214,6 +214,16 @@ class OSKernel:
           4. Unified Orchestrator (LLM + tool calling)
         """
         try:
+            # 0. Emergency stop — halt any running autonomous task immediately.
+            if text.strip().lower().rstrip(".!") in (
+                "stop", "stop it", "stop everything", "cancel", "cancel task",
+                "abort", "halt", "emergency stop", "stop the task",
+            ):
+                from core.control import get_control_plane
+                get_control_plane().request_stop("voice/text command")
+                return {"success": True, "response": "Stopped. Halting all active tasks, sir.",
+                        "action": "EmergencyStop", "response_stream": None}
+
             # 1. Check for predefined workflows
             try:
                 from core.workflow_composer import WorkflowComposer

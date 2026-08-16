@@ -98,6 +98,12 @@ class ReActLoop:
         logger.info("[ReActLoop] Starting agentic workflow for goal: '%s'", goal)
         self._notify_ui(goal, "Planning...", 10)
 
+        # A fresh task clears any prior emergency stop so it isn't killed by a
+        # stale flag; the loop then re-checks the flag before every step.
+        from core.control import get_control_plane
+        control = get_control_plane()
+        control.clear_stop()
+
         scratchpad: List[StepResult] = []
         # Fingerprint counter for loop detection: "tool_name(args_json)" -> count
         call_counts: Dict[str, int] = {}
@@ -112,6 +118,17 @@ class ReActLoop:
         tool_schemas = self.registry.get_tool_schemas_for_llm()
 
         for iteration in range(1, self.max_iterations + 1):
+            # Emergency stop: halt cleanly between steps if the user hit stop.
+            if control.is_stopped():
+                logger.warning("[ReActLoop] Emergency stop — halting workflow.")
+                self._notify_ui(goal, "Stopped", 100)
+                return AgenticResult(
+                    success=False,
+                    response="Stopped, sir. " + self._deterministic_summary(scratchpad),
+                    steps=scratchpad,
+                    total_time=time.time() - start_time,
+                )
+
             percent = int((iteration / self.max_iterations) * 85)
             self._notify_ui(goal, f"Step {iteration}: reasoning...", percent)
 
