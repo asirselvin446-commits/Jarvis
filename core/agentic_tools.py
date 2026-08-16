@@ -64,6 +64,20 @@ class AgenticToolRegistry:
         """Return list of available tool names."""
         return list(self._tool_manager.tools.keys())
 
+    def get_meta(self, name: str) -> Dict[str, Any]:
+        """Return safety metadata for a tool (flags declared on the @tool decorator).
+
+        Keys: ``is_dangerous``, ``requires_confirmation``. Unknown tools return
+        an empty dict so callers can treat missing tools as non-dangerous.
+        """
+        data = self._tool_manager.tools.get(name)
+        if not data:
+            return {}
+        return {
+            "is_dangerous": bool(data.get("is_dangerous", False)),
+            "requires_confirmation": bool(data.get("requires_confirmation", False)),
+        }
+
 
 # Global singleton instance
 _registry_instance: Optional[AgenticToolRegistry] = None

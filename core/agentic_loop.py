@@ -8,6 +8,7 @@ Uses llm_chat() with tool schemas for structured tool invocation instead of
 brittle JSON text parsing. This is the gold-standard agentic pattern.
 """
 
+import os
 import json
 import time
 import logging
@@ -48,10 +49,38 @@ class ReActLoop:
     # Break out if the same (tool, args) pair is attempted this many times.
     MAX_REPEAT = 3
 
-    def __init__(self, max_iterations: int = 10, registry: Optional[AgenticToolRegistry] = None):
+    # Substrings in a tool name that mark it as potentially destructive/irreversible.
+    # Catches high-risk tools that were never given an explicit is_dangerous flag.
+    _DANGEROUS_NAME_HINTS = (
+        "delete", "remove", "kill", "uninstall", "format", "wipe", "erase",
+        "shutdown", "reboot", "restart", "send", "email", "message", "whatsapp",
+        "post", "publish", "buy", "purchase", "pay", "transfer", "commit", "push",
+        "terminal", "powershell", "shell", "exec", "run_python", "write_code",
+    )
+
+    def __init__(self, max_iterations: int = 10,
+                 registry: Optional[AgenticToolRegistry] = None,
+                 autonomy: Optional[str] = None):
         self.max_iterations = max_iterations
         self.registry: AgenticToolRegistry = registry or get_agentic_tools()
         self.bus = get_message_bus()
+        # Autonomy policy for destructive tools:
+        #   "guarded" (default) — refuse dangerous tools and ask the user to confirm
+        #   "full"              — execute everything, no confirmation
+        self.autonomy = (autonomy or os.environ.get("JARVIS_AGENTIC_AUTONOMY", "guarded")).lower()
+
+    def _is_dangerous(self, tool_name: str) -> bool:
+        """Decide whether a tool needs explicit confirmation before running.
+
+        Combines the declared safety flags (``is_dangerous`` /
+        ``requires_confirmation`` from the @tool decorator) with a name-based
+        heuristic, since most destructive tools were never flagged.
+        """
+        meta = self.registry.get_meta(tool_name) if hasattr(self.registry, "get_meta") else {}
+        if meta.get("is_dangerous") or meta.get("requires_confirmation"):
+            return True
+        low = tool_name.lower()
+        return any(hint in low for hint in self._DANGEROUS_NAME_HINTS)
 
     def run(self, goal: str, context: str = "") -> AgenticResult:
         """
@@ -151,6 +180,33 @@ class ReActLoop:
                     })
                     break
 
+                # ── Safety gate: refuse destructive tools unless autonomy=full ──
+                if self.autonomy != "full" and self._is_dangerous(tool_name):
+                    logger.warning("[ReActLoop] Blocked dangerous tool '%s' (autonomy=%s).",
+                                   tool_name, self.autonomy)
+                    observation = (
+                        f"BLOCKED: '{tool_name}' is a potentially destructive/irreversible action "
+                        f"and requires the user's explicit confirmation. It was NOT executed. "
+                        f"Do not retry it. Continue with any safe steps you can, then finish with a "
+                        f"spoken summary that clearly asks the user to confirm this specific action "
+                        f"(mention the tool and what it would do) before it can proceed."
+                    )
+                    scratchpad.append(StepResult(
+                        thought=content or f"Blocked {tool_name}",
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        observation=observation,
+                    ))
+                    messages.append({"role": "assistant",
+                                     "content": f"Attempted {tool_name}({json.dumps(tool_args, default=str)})"})
+                    messages.append({"role": "user", "content": observation})
+                    try:
+                        self.bus.publish("agentic_blocked", sender="agentic_loop",
+                                         payload={"tool": tool_name, "args": str(tool_args)})
+                    except Exception:
+                        pass
+                    continue
+
                 logger.info("[ReActLoop] Iteration %d: Calling tool '%s' with args: %s",
                             iteration, tool_name, tool_args)
                 self._notify_ui(goal, f"Executing: {tool_name}", min(percent + 5, 95))
@@ -242,8 +298,14 @@ class ReActLoop:
             "4. If a tool fails or returns an error, adapt: fix the arguments or try a different tool. "
             "Do not repeat the exact same failing call.\n"
             "5. For GUI tasks with no dedicated tool, use `computer_use(goal=\"...\")` as a fallback.\n"
-            "6. Be efficient — don't take unnecessary steps. Prefer the most direct path to the goal.\n\n"
-            f"CONTEXT (memory, screen state, conversation):\n{context or 'None'}\n"
+            "6. Be efficient — don't take unnecessary steps. Prefer the most direct path to the goal.\n"
+            + (
+                "7. SAFETY: destructive or irreversible actions (deleting, sending messages/email, "
+                "killing processes, running shell commands, purchases) are guarded. If one is blocked, "
+                "do NOT retry it — finish and clearly ask the user to confirm that specific action.\n"
+                if self.autonomy != "full" else ""
+            )
+            + f"\nCONTEXT (memory, screen state, conversation):\n{context or 'None'}\n"
         )
 
     def _notify_ui(self, task: str, status: str, percent: int):

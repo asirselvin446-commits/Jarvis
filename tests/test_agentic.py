@@ -20,8 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 class _FakeRegistry:
     """Stand-in for AgenticToolRegistry that records calls instead of running tools."""
 
-    def __init__(self):
+    def __init__(self, meta=None):
         self.calls = []
+        self._meta = meta or {}
 
     def get_tool_schemas_for_llm(self):
         return []
@@ -29,6 +30,9 @@ class _FakeRegistry:
     def execute(self, name, args):
         self.calls.append((name, args))
         return f"ok:{name}"
+
+    def get_meta(self, name):
+        return self._meta.get(name, {})
 
 
 def _tool_call(name, args):
@@ -91,6 +95,64 @@ class TestReActLoop:
 
         # No steps at all -> graceful message.
         assert loop._synthesize_summary("goal", []) != ""
+
+
+class TestSafetyGate:
+    def test_dangerous_tool_blocked_in_guarded_mode(self, monkeypatch):
+        import core.agentic_loop as al
+
+        # Model tries to delete files, then (after the block) gives a summary.
+        seq = [
+            _tool_call("delete_folder", {"path": "C:/important"}),
+            {"content": "I need your confirmation before deleting that, sir.", "tool_calls": []},
+        ]
+        state = {"i": 0}
+
+        def fake_chat(messages, tools=None, temperature=0.0, timeout=60):
+            r = seq[min(state["i"], len(seq) - 1)]
+            state["i"] += 1
+            return r
+
+        monkeypatch.setattr(al, "llm_chat", fake_chat)
+        reg = _FakeRegistry()
+        loop = al.ReActLoop(max_iterations=6, registry=reg, autonomy="guarded")
+        res = loop.run("delete my important folder", context="")
+
+        # The destructive tool was never actually executed.
+        assert reg.calls == []
+        # But it was recorded as a blocked step.
+        assert any(s.tool_name == "delete_folder" for s in res.steps)
+        assert "confirmation" in res.response.lower()
+
+    def test_full_autonomy_executes_dangerous_tool(self, monkeypatch):
+        import core.agentic_loop as al
+
+        seq = [
+            _tool_call("delete_folder", {"path": "C:/tmp"}),
+            {"content": "Deleted.", "tool_calls": []},
+        ]
+        state = {"i": 0}
+
+        def fake_chat(messages, tools=None, temperature=0.0, timeout=60):
+            r = seq[min(state["i"], len(seq) - 1)]
+            state["i"] += 1
+            return r
+
+        monkeypatch.setattr(al, "llm_chat", fake_chat)
+        reg = _FakeRegistry()
+        loop = al.ReActLoop(max_iterations=6, registry=reg, autonomy="full")
+        loop.run("delete the temp folder", context="")
+        assert ("delete_folder", {"path": "C:/tmp"}) in reg.calls
+
+    def test_flag_based_danger_detection(self):
+        import core.agentic_loop as al
+
+        # A tool with a safe-sounding name but flagged dangerous is still caught.
+        reg = _FakeRegistry(meta={"do_thing": {"is_dangerous": True}})
+        loop = al.ReActLoop(registry=reg, autonomy="guarded")
+        assert loop._is_dangerous("do_thing") is True
+        assert loop._is_dangerous("send_email") is True   # name heuristic
+        assert loop._is_dangerous("get_weather") is False
 
 
 class TestAgenticRouting:

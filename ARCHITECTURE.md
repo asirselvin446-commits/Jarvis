@@ -58,7 +58,8 @@ For open-ended, multi-step goals ("open my email, find the Amazon invoice, then 
 - **Full tool access**: via `core/agentic_tools.py` it can chain *any* of the 127+ registered plugin tools across steps (it reuses the Orchestrator's `ToolManager`, so plugins load once).
 - **Routing gate**: `Orchestrator._is_agentic_goal()` is a conservative heuristic — sequencing/conditional phrasing ("then", "until", "for each") or multi-action requests go agentic; simple commands ("open chrome", "set volume to 50") stay on the low-latency single-shot path.
 - **Loop safety**: identical repeated tool calls are detected and capped (`MAX_REPEAT`), with one corrective nudge before the workflow ends and synthesizes a spoken summary — so it can never spin forever.
-- **Toggle**: set `JARVIS_AGENTIC_MODE=0` to force the classic single-shot pipeline.
+- **Destructive-action guard**: before executing, each tool is screened via its declared `is_dangerous`/`requires_confirmation` flags *plus* a name heuristic (delete, send, email, kill, shell, purchase, …). Under the default `guarded` autonomy the loop **refuses** such tools, records the intent, and ends by asking the user to confirm that specific action — nothing destructive runs unattended. Set `JARVIS_AGENTIC_AUTONOMY=full` to disable the guard.
+- **Toggles**: `JARVIS_AGENTIC_MODE=0` forces the classic single-shot pipeline; `JARVIS_AGENTIC_AUTONOMY` (`guarded` default / `full`) controls the destructive-action guard.
 
 ### 2.4 Context & Memory
 - **`core/memory.py`**: 
