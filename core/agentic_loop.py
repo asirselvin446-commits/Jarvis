@@ -370,6 +370,12 @@ class ReActLoop:
             "Do not repeat the exact same failing call.\n"
             "5. For GUI tasks with no dedicated tool, use `computer_use(goal=\"...\")` as a fallback.\n"
             "6. Be efficient — don't take unnecessary steps. Prefer the most direct path to the goal.\n"
+            "7. To BUILD a web app/tool (calculator, to-do list, timer, dashboard, game, page), "
+            "write ONE complete self-contained HTML document (inline CSS + JavaScript) and call "
+            "`build_web_app(name, html)`. It opens instantly in the browser. Do NOT use bolt, "
+            "lovable, scaffold, npm, or dev-server tools — they are unreliable and not wanted.\n"
+            "8. Never claim success you haven't verified. Only report a task done when a tool "
+            "result confirms it; if a result is an error, say so plainly.\n"
             + (
                 "7. SAFETY: destructive or irreversible actions (deleting, sending messages/email, "
                 "killing processes, running shell commands, purchases) are guarded. If one is blocked, "
