@@ -129,7 +129,7 @@ class WakeWordDetector:
             # Compute features
             features = {
                 "energy": float(np.sum(audio ** 2)),
-                "zero_crossing_rate": float(np.sum(np.abs(np.diff(np.sign(audio)))))) / len(audio),
+                "zero_crossing_rate": float(np.sum(np.abs(np.diff(np.sign(audio)))) / len(audio)),
                 "spectral_centroid": self._compute_spectral_centroid(audio),
                 "mfcc": self._compute_mfcc(audio),
             }

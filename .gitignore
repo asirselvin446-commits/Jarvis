@@ -48,12 +48,20 @@ coverage.xml
 
 # Environments
 .env
+*.env
+!.env.example
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Secrets / scratch notes containing API keys
+open router.txt
+
+# Runtime state (regenerated on each run)
+kernel_state.json
 
 # IDE & OS
 .vscode/

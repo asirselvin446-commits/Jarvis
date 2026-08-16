@@ -3,6 +3,7 @@ Screen Diagnostics & Issue Detection System for Jarvis
 Real-time monitoring, issue detection, and auto-remediation suggestions.
 """
 
+import os
 import logging
 import threading
 import time
