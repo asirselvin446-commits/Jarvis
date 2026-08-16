@@ -5,10 +5,41 @@ Central configuration for the voice assistant.
 
 import os
 
+# ─── Project Version ──────────────────────────────────────────────
+VERSION = "1.0.0"
+
+# ─── Logging ──────────────────────────────────────────────────────
+LOG_FILE = "jarvis.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024   # 5MB per log file
+LOG_BACKUP_COUNT = 3              # Keep 3 rotated backups
+LOG_LEVEL = "INFO"
+
+# ─── Server Ports ─────────────────────────────────────────────────
+WEB_SERVER_PORT = 5000
+MCP_SERVER_PORT = 8000
+GATEWAY_PORT = 5100              # Omni-channel webhook gateway (must differ from WEB_SERVER_PORT)
+
 # ─── Assistant Identity ────────────────────────────────────────────
 ASSISTANT_NAME = "Jarvis"
 WAKE_WORD = "jarvis"
-GREETING = "Hello! I am Jarvis, your personal assistant. How can I help you?"
+
+def get_contextual_greeting() -> str:
+    """Returns a time-of-day contextual Jarvis greeting."""
+    import datetime
+    hour = datetime.datetime.now().hour
+    if hour >= 22 or hour < 5:
+        return "Working late into the night, sir? All systems are online and at your disposal."
+    elif 5 <= hour < 12:
+        return "Good morning, sir. System diagnostics nominal. Ready for today's objectives."
+    elif 12 <= hour < 17:
+        return "Good afternoon, sir. How may I assist you?"
+    else:
+        return "Good evening, sir. Online and standing by."
+
+GREETING = get_contextual_greeting()
+
+# ─── Smart Home & Integrations ────────────────────────────────────
+SMARTTHINGS_PAT = os.environ.get("SMARTTHINGS_PAT", "")
 
 # ─── Voice Settings ────────────────────────────────────────────────
 VOICE_RATE = 175          # Words per minute (default ~200)
@@ -33,18 +64,18 @@ STT_COMPUTE_TYPE = "int8"            # Fast CPU inference
 # Intelligent Silence Detection
 SILENCE_THRESHOLD_SHORT = 1.5        # Seconds — speech likely done
 SILENCE_THRESHOLD_LONG = 3.0         # Seconds — mid-sentence pause tolerance
-ENERGY_SILENCE_DB = -40              # dB threshold for "silence"
+ENERGY_SILENCE_DB = -45              # dB threshold for "silence" (lowered to pick up normal speech volume)
 MAX_RECORDING_SECONDS = 30.0         # Hard cap on single utterance
 
 # Conversation Session
-FOLLOW_UP_WINDOW = 8.0               # Seconds for follow-up (no wake word)
+FOLLOW_UP_WINDOW = 6.0               # 6.0 = 6-second active follow-up window (speak follow-up commands without wake word)
 CONVERSATION_TIMEOUT = 30.0          # Seconds before context expires
 CONVERSATION_HISTORY_TURNS = 10      # Turns to keep in active context
 
 # TTS (edge-tts neural voice)
-TTS_VOICE = "en-US-GuyNeural"        # Microsoft neural voice
-TTS_RATE = "+10%"                    # Speech speed adjustment
-TTS_VOLUME = "+0%"                   # Volume adjustment
+TTS_VOICE = "en-US-AndrewMultilingualNeural"  # Latest-gen neural voice (most natural)
+TTS_RATE = "+5%"                     # Slightly faster than default (natural pace)
+TTS_VOLUME = "+50%"                  # Volume boost so Jarvis is clearly audible
 
 USER_HOME = os.path.expanduser("~")
 LOCAL_APP = os.path.join(USER_HOME, "AppData", "Local")
@@ -87,7 +118,7 @@ APP_PATHS = {
     "vlc": os.path.join(PROGRAM_FILES, "VideoLAN", "VLC", "vlc.exe"),
     "obs": os.path.join(PROGRAM_FILES, "obs-studio", "bin", "64bit", "obs64.exe"),
     "telegram": os.path.join(ROAMING_APP, "Telegram Desktop", "Telegram.exe"),
-    "whatsapp": os.path.join(LOCAL_APP, "WhatsApp", "WhatsApp.exe"),
+    "whatsapp": "whatsapp:",
     "brave": os.path.join(PROGRAM_FILES, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
     "youtube": "https://www.youtube.com",
     "facebook": "https://www.facebook.com",
