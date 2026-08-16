@@ -226,6 +226,18 @@ class OSKernel:
             except Exception:
                 pass
 
+            # 1.5 Open-ended / multi-step goal → go straight to the agentic loop.
+            #     Fast-path and single-purpose skills only handle the FIRST clause
+            #     (e.g. "open youtube and play Shape of You" would just open
+            #     YouTube), so multi-step commands must bypass them and reach the
+            #     Orchestrator's adaptive ReAct loop.
+            try:
+                if self.orchestrator._is_agentic_goal(text):
+                    logger.info("[OSKernel] Routing multi-step goal to agentic Orchestrator: '%s'", text[:60])
+                    return self.orchestrator.process_command(text, conversation_context)
+            except Exception as e:
+                logger.debug("[OSKernel] Agentic pre-routing check skipped: %s", e)
+
             # 2. Fast-path regex router (zero-latency for common commands)
             fast_result = self._check_fast_path(text)
             if fast_result:
