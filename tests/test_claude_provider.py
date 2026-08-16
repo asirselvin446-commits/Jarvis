@@ -99,3 +99,40 @@ class TestAnthropicChat:
         monkeypatch.setattr(lp, "PREFER_CLOUD_ONLY", True)
         lp.llm_chat([{"role": "user", "content": "hi"}])
         assert called["claude"] is False
+
+
+class TestGroqRouting:
+    def test_agentic_preference_modes(self, monkeypatch):
+        lp._anthropic_state["disabled"] = False
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+        monkeypatch.setenv("GROQ_API_KEY", "gsk")
+        assert lp.agentic_preference("auto") == "anthropic"
+        assert lp.agentic_preference("groq") == "groq"
+        assert lp.agentic_preference("free") is None
+        # Claude disabled at runtime -> auto falls to Groq
+        lp._anthropic_state["disabled"] = True
+        assert lp.agentic_preference("auto") == "groq"
+        lp._anthropic_state["disabled"] = False
+
+    def test_billing_error_detection(self):
+        assert lp._is_anthropic_unavailable_error(
+            Exception("Your credit balance is too low to access the Anthropic API"))
+        assert not lp._is_anthropic_unavailable_error(Exception("read timeout"))
+
+    def test_claude_billing_failure_reroutes_to_groq(self, monkeypatch):
+        lp._anthropic_state["disabled"] = False
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+        monkeypatch.setenv("GROQ_API_KEY", "gsk")
+
+        def boom(*a, **k):
+            raise Exception("Your credit balance is too low")
+
+        monkeypatch.setattr(lp, "_anthropic_chat", boom)
+        monkeypatch.setattr(lp, "_openai_compat_chat",
+                            lambda *a, **k: {"content": "[groq] ok"})
+
+        r = lp.llm_chat([{"role": "user", "content": "build"}], prefer="anthropic")
+        assert r.get("content") == "[groq] ok"
+        assert lp._anthropic_state["disabled"] is True
+        assert lp.has_claude() is False  # disabled reflected everywhere
+        lp._anthropic_state["disabled"] = False  # reset for other tests

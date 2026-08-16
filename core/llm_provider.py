@@ -89,9 +89,52 @@ def _get_anthropic_api_key() -> Optional[str]:
     return os.environ.get("ANTHROPIC_API_KEY")
 
 
+# Runtime state: once Claude reports no credits (or auth failure), stop trying it
+# and route to the next capable provider (Groq) until the app restarts.
+_anthropic_state = {"disabled": False, "reason": None}
+
+
 def has_claude() -> bool:
-    """True if a Claude API key is configured."""
-    return bool(_get_anthropic_api_key())
+    """True if a Claude API key is configured AND it hasn't been disabled at runtime."""
+    return bool(_get_anthropic_api_key()) and not _anthropic_state["disabled"]
+
+
+def has_groq() -> bool:
+    """True if a Groq API key is configured."""
+    return bool(_get_groq_api_key())
+
+
+def _is_anthropic_unavailable_error(e: Exception) -> bool:
+    """Detect billing/credit/auth errors that mean Claude can't serve requests at all."""
+    msg = str(e).lower()
+    return any(s in msg for s in (
+        "credit balance is too low", "plans & billing", "billing",
+        "insufficient", "authentication_error", "invalid x-api-key", "401",
+    ))
+
+
+def agentic_preference(mode: Optional[str] = None) -> Optional[str]:
+    """Which provider the agentic loop should prefer, resolved live.
+
+    JARVIS_AGENTIC_PROVIDER: auto (default) | claude | groq | free.
+      auto  → Claude if it has credits, else Groq if available, else free tier.
+      claude→ Claude (if a key is present and not disabled).
+      groq  → Groq (if a key is present).
+      free  → no preference (Gemini/Groq/OpenRouter/Ollama in that order).
+    """
+    mode = (mode or os.environ.get("JARVIS_AGENTIC_PROVIDER", "auto")).lower()
+    if mode == "free":
+        return None
+    if mode in ("claude", "anthropic"):
+        return "anthropic" if has_claude() else ("groq" if has_groq() else None)
+    if mode == "groq":
+        return "groq" if has_groq() else None
+    # auto
+    if has_claude():
+        return "anthropic"
+    if has_groq():
+        return "groq"
+    return None
 
 
 def is_online() -> bool:
@@ -788,13 +831,36 @@ def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
     failures fall through to the free providers below.
     """
     # ── Anthropic Claude (opt-in: coding/build tasks) ────────────
-    if _get_anthropic_api_key() and (prefer == "anthropic" or PREFER_CLAUDE):
+    if _get_anthropic_api_key() and not _anthropic_state["disabled"] and (
+            prefer == "anthropic" or PREFER_CLAUDE):
         try:
             result = _anthropic_chat(messages, tools, temperature, max(timeout, 120))
             logger.debug("[LLM] Claude call succeeded")
             return result
         except Exception as e:
-            logger.warning("[LLM] Claude call failed (%s), falling back to other providers", e)
+            if _is_anthropic_unavailable_error(e):
+                # No credits / bad key — stop trying Claude and reroute to Groq.
+                _anthropic_state["disabled"] = True
+                _anthropic_state["reason"] = str(e)[:200]
+                logger.warning("[LLM] Claude unavailable (%s). Disabling Claude; "
+                               "routing to Groq/free providers.", str(e)[:120])
+                if has_groq():
+                    prefer = "groq"
+            else:
+                logger.warning("[LLM] Claude call failed (%s), falling back to other providers", e)
+
+    # ── Groq preferred (or rerouted here after Claude ran out of credits) ──
+    if prefer == "groq":
+        groq_key_p = _get_groq_api_key()
+        if groq_key_p:
+            try:
+                result = _openai_compat_chat(
+                    GROQ_API_URL, groq_key_p, GROQ_MODEL,
+                    messages, tools, temperature, min(timeout, 45))
+                logger.debug("[LLM] Groq (preferred) call succeeded")
+                return result
+            except Exception as e:
+                logger.warning("[LLM] Groq (preferred) failed (%s), falling back", e)
 
     api_key = _get_api_key()
     if api_key:

@@ -71,23 +71,19 @@ class ReActLoop:
         #   "guarded" (default) — refuse dangerous tools and ask the user to confirm
         #   "full"              — execute everything, no confirmation
         self.autonomy = (autonomy or os.environ.get("JARVIS_AGENTIC_AUTONOMY", "guarded")).lower()
-        # LLM routing for the agentic brain. JARVIS_AGENTIC_PROVIDER:
-        #   "auto" (default) — use Claude if an ANTHROPIC_API_KEY is present, else free tier
-        #   "claude"         — always use Claude
-        #   "free"           — never use Claude (Gemini/Groq/OpenRouter/Ollama)
-        # Claude is the strongest coder, so building/coding tasks route to it.
-        self.prefer_llm = self._resolve_llm_preference()
+        # LLM routing for the agentic brain (resolved live each run so it adapts
+        # when Claude runs out of credits mid-session). JARVIS_AGENTIC_PROVIDER:
+        #   "auto" (default) — Claude if it has credits, else Groq, else free tier
+        #   "claude"         — Claude (falls back to Groq if Claude is unavailable)
+        #   "groq"           — Groq
+        #   "free"           — never prefer a paid/premium provider
 
     @staticmethod
     def _resolve_llm_preference() -> Optional[str]:
-        mode = os.environ.get("JARVIS_AGENTIC_PROVIDER", "auto").lower()
-        if mode == "free":
-            return None
-        if mode == "claude":
-            return "anthropic"
+        """Resolve the preferred provider for THIS run (state-aware)."""
         try:
-            from core.llm_provider import has_claude
-            return "anthropic" if has_claude() else None
+            from core.llm_provider import agentic_preference
+            return agentic_preference()
         except Exception:
             return None
 
@@ -122,6 +118,9 @@ class ReActLoop:
         from core.control import get_control_plane
         control = get_control_plane()
         control.clear_stop()
+
+        # Resolve which LLM to prefer for this run (adapts if Claude is out of credits).
+        prefer_llm = self._resolve_llm_preference()
 
         scratchpad: List[StepResult] = []
         # Fingerprint counter for loop detection: "tool_name(args_json)" -> count
@@ -158,7 +157,7 @@ class ReActLoop:
             for attempt in range(self.MAX_LLM_RETRIES + 1):
                 try:
                     result = llm_chat(messages, tools=tool_schemas, temperature=0.0,
-                                      timeout=120, prefer=self.prefer_llm)
+                                      timeout=120, prefer=prefer_llm)
                 except Exception as e:
                     logger.warning("[ReActLoop] LLM call raised (attempt %d): %s", attempt + 1, e)
                     result = None
