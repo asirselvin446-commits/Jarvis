@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from core.agentic_tools import get_agentic_tools, AgenticToolRegistry
 from core.llm_provider import llm_chat
 from core.message_bus import get_message_bus
+from core.verification_agent import FAILURE_KEYWORDS, SUCCESS_KEYWORDS
 
 logger = logging.getLogger("jarvis.agentic_loop")
 
@@ -28,6 +29,9 @@ class StepResult:
     tool_name: str
     tool_args: Dict[str, Any]
     observation: str
+    # Verified outcome of this step: True = succeeded, False = failed,
+    # None = unclear. Never claim success for a step that isn't verified.
+    succeeded: Optional[bool] = None
 
 
 @dataclass
@@ -198,7 +202,7 @@ class ReActLoop:
                 self._notify_ui(goal, "Done", 100)
                 logger.info("[ReActLoop] Finished at iteration %d with text response", iteration)
                 return AgenticResult(
-                    success=True,
+                    success=self._overall_success(scratchpad),
                     response=final_response,
                     steps=scratchpad,
                     total_time=time.time() - start_time
@@ -226,7 +230,7 @@ class ReActLoop:
                     if repeats > self.MAX_REPEAT + 1:
                         logger.warning("[ReActLoop] Nudge ignored — ending workflow.")
                         return AgenticResult(
-                            success=bool(scratchpad),
+                            success=bool(scratchpad) and self._overall_success(scratchpad),
                             response=self._synthesize_summary(goal, scratchpad),
                             steps=scratchpad,
                             total_time=time.time() - start_time,
@@ -258,6 +262,7 @@ class ReActLoop:
                         tool_name=tool_name,
                         tool_args=tool_args,
                         observation=observation,
+                        succeeded=False,  # blocked means it did NOT happen
                     ))
                     messages.append({"role": "assistant",
                                      "content": f"Attempted {tool_name}({json.dumps(tool_args, default=str)})"})
@@ -275,22 +280,28 @@ class ReActLoop:
 
                 # Execute the tool
                 observation = self.registry.execute(tool_name, tool_args)
-                logger.info("[ReActLoop] Iteration %d: Tool '%s' returned: %s",
-                            iteration, tool_name, str(observation)[:200])
+                succeeded = self._verify_observation(observation)
+                logger.info("[ReActLoop] Iteration %d: Tool '%s' returned (verified=%s): %s",
+                            iteration, tool_name, succeeded, str(observation)[:200])
 
                 # Record step
                 scratchpad.append(StepResult(
                     thought=content or f"Calling {tool_name}",
                     tool_name=tool_name,
                     tool_args=tool_args,
-                    observation=observation
+                    observation=observation,
+                    succeeded=succeeded,
                 ))
 
-                # Append tool call and result to conversation for multi-turn
+                # Append tool call and result to conversation for multi-turn.
+                # Failures are labelled explicitly so the model reliably notices
+                # and adapts instead of assuming the step worked.
+                verdict = {True: "SUCCEEDED", False: "FAILED", None: "UNCLEAR"}[succeeded]
                 messages.append({"role": "assistant",
                                  "content": f"Called {tool_name}({json.dumps(tool_args, default=str)})"})
                 messages.append({"role": "user",
-                                 "content": f"Tool '{tool_name}' returned:\n{str(observation)[:1500]}"})
+                                 "content": f"Tool '{tool_name}' {verdict}. It returned:\n"
+                                            f"{str(observation)[:1500]}"})
 
                 # Publish tool execution event for UI updates
                 try:
@@ -307,19 +318,77 @@ class ReActLoop:
         self._notify_ui(goal, "Wrapping up", 100)
         logger.info("[ReActLoop] Reached max iterations (%d)", self.max_iterations)
         return AgenticResult(
-            success=bool(scratchpad),
+            success=bool(scratchpad) and self._overall_success(scratchpad),
             response=self._synthesize_summary(goal, scratchpad),
             steps=scratchpad,
             total_time=time.time() - start_time
         )
 
     @staticmethod
+    def _verify_observation(observation: Any) -> Optional[bool]:
+        """Judge whether a tool result reports success, failure, or is unclear.
+
+        Returns True (verified success), False (verified failure) or None
+        (unclear — claim neither). Deliberately heuristic-only: the loop
+        already makes one LLM call per iteration and the free tiers are
+        rate-limited, so verification must not add a second call per step.
+        """
+        text = str(observation).strip()
+        if not text:
+            return None
+        lowered = text.lower()
+
+        # ToolManager returns {"error": ...} and the registry returns
+        # "Error ..." strings when a tool raises.
+        if lowered.startswith(("{'error'", '{"error"')):
+            return False
+        if "traceback (most recent call last)" in lowered:
+            return False
+
+        # Earliest signal wins: a result that *starts* by reporting success is a
+        # success even if its payload quotes failure words later (e.g. sending a
+        # message whose body says "I could not make it"), and vice-versa.
+        first_fail = min((lowered.find(k) for k in FAILURE_KEYWORDS if k in lowered),
+                         default=-1)
+        first_ok = min((lowered.find(k) for k in SUCCESS_KEYWORDS if k in lowered),
+                       default=-1)
+
+        if first_fail == -1 and first_ok == -1:
+            return None
+        if first_fail == -1:
+            return True
+        if first_ok == -1:
+            return False
+        return first_ok < first_fail
+
+    @staticmethod
+    def _overall_success(scratchpad: List[StepResult]) -> bool:
+        """Whether the run as a whole should be reported as successful.
+
+        A ReAct run often includes a failed step that a later step recovers
+        from, so one failure is not fatal. But if the final action failed, or
+        every action failed, the goal was not achieved — say so.
+        """
+        real = [s for s in scratchpad if s.tool_name != "ERROR"]
+        if not real:
+            return True  # nothing was attempted, so there's no failure to report
+        if real[-1].succeeded is False:
+            return False
+        if all(s.succeeded is False for s in real):
+            return False
+        return True
+
+    @staticmethod
     def _deterministic_summary(scratchpad: List[StepResult]) -> str:
         """Summarize actions taken WITHOUT calling the LLM (used when it's down)."""
-        tools = [s.tool_name for s in scratchpad if s.tool_name != "ERROR"]
-        if not tools:
+        steps = [s for s in scratchpad if s.tool_name != "ERROR"]
+        if not steps:
             return "I hadn't completed any actions yet."
-        return "So far I ran: " + ", ".join(tools[-6:]) + "."
+        ran = "So far I ran: " + ", ".join(s.tool_name for s in steps[-6:]) + "."
+        failed = [s.tool_name for s in steps if s.succeeded is False]
+        if failed:
+            ran += " These failed: " + ", ".join(dict.fromkeys(failed)) + "."
+        return ran
 
     def _synthesize_summary(self, goal: str, scratchpad: List[StepResult]) -> str:
         """Produce a concise, natural spoken summary of what was accomplished.
@@ -331,8 +400,10 @@ class ReActLoop:
         if not scratchpad:
             return "I wasn't able to take any action on that, sir."
 
+        marker = {True: "SUCCEEDED", False: "FAILED", None: "UNCLEAR"}
         steps_text = "\n".join(
-            f"- {s.tool_name}: {str(s.observation)[:150]}" for s in scratchpad[-8:]
+            f"- {s.tool_name} [{marker[s.succeeded]}]: {str(s.observation)[:150]}"
+            for s in scratchpad[-8:]
         )
         try:
             summary = llm_chat(
@@ -340,6 +411,8 @@ class ReActLoop:
                     {"role": "system", "content":
                         "You are J.A.R.V.I.S. Summarize the outcome of the actions you took in "
                         "1-2 short spoken sentences for the user. Be concrete about what got done. "
+                        "Each action is tagged SUCCEEDED, FAILED or UNCLEAR. Never claim something "
+                        "worked if it is tagged FAILED — say plainly what failed. "
                         "No tool calls, no markdown."},
                     {"role": "user", "content":
                         f"Goal: {goal}\n\nActions taken:\n{steps_text}\n\nGive the spoken summary."},
@@ -353,6 +426,11 @@ class ReActLoop:
             logger.debug("[ReActLoop] Summary synthesis failed: %s", e)
 
         last = scratchpad[-1]
+        failed = [s.tool_name for s in scratchpad if s.succeeded is False]
+        if failed:
+            return (f"I ran {len(scratchpad)} step(s), but these failed: "
+                    f"{', '.join(dict.fromkeys(failed))}. "
+                    f"Last result: {str(last.observation)[:200]}")
         return f"I completed {len(scratchpad)} step(s). Last result: {str(last.observation)[:200]}"
 
     def _build_system_prompt(self, goal: str, context: str) -> str:
