@@ -103,6 +103,10 @@ def _get_pipeline():
             conversation_timeout=config.CONVERSATION_TIMEOUT,
             energy_silence_db=config.ENERGY_SILENCE_DB,
             vad_aggressiveness=getattr(config, "VAD_AGGRESSIVENESS", 1),
+            gain_enabled=getattr(config, "MIC_GAIN_ENABLED", True),
+            gain_target_peak=getattr(config, "MIC_GAIN_TARGET_PEAK", 0.95),
+            gain_max=getattr(config, "MIC_GAIN_MAX", 12.0),
+            gain_noise_floor=getattr(config, "MIC_GAIN_NOISE_FLOOR", 200),
         )
 
         # ── Wire pipeline callbacks to WebSocket broadcast ───────

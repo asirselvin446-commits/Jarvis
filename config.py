@@ -67,6 +67,19 @@ STT_COMPUTE_TYPE = "int8"            # Fast CPU inference
 # voice; raise toward 3 only if a noisy room causes false triggers.
 VAD_AGGRESSIVENESS = 1
 
+# Microphone gain normalization — the fix for "I have to shout".
+# Quiet mics produce low-amplitude audio that VAD and Whisper struggle to hear.
+# Before transcription we peak-normalize captured speech up to a consistent
+# level so normal-volume speech is heard clearly.
+#   ENABLED     — turn software gain on/off
+#   TARGET_PEAK — normalize the loudest sample up to this fraction of full-scale
+#   MAX         — never amplify by more than this factor (avoids blowing up hiss)
+#   NOISE_FLOOR — int16 peak below this is treated as silence and left untouched
+MIC_GAIN_ENABLED = True
+MIC_GAIN_TARGET_PEAK = 0.95
+MIC_GAIN_MAX = 12.0
+MIC_GAIN_NOISE_FLOOR = 200
+
 # Intelligent Silence Detection
 SILENCE_THRESHOLD_SHORT = 1.5        # Seconds — speech likely done
 SILENCE_THRESHOLD_LONG = 3.0         # Seconds — mid-sentence pause tolerance

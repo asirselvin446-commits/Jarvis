@@ -93,6 +93,10 @@ class StreamingSTT:
         energy_silence_db: float = -30.0,
         max_recording_seconds: float = 30.0,
         vad_aggressiveness: int = 1,
+        gain_enabled: bool = True,
+        gain_target_peak: float = 0.95,
+        gain_max: float = 12.0,
+        gain_noise_floor: int = 200,
     ):
         self.model_size = model_size
         self.device = device
@@ -102,6 +106,12 @@ class StreamingSTT:
         self.energy_silence_db = energy_silence_db
         self.max_recording_seconds = max_recording_seconds
         self.vad_aggressiveness = max(0, min(3, int(vad_aggressiveness)))
+        # Software mic gain — normalizes quiet speech up to a consistent level
+        # so the user doesn't have to shout. See config.MIC_GAIN_*.
+        self.gain_enabled = gain_enabled
+        self.gain_target_peak = gain_target_peak
+        self.gain_max = gain_max
+        self.gain_noise_floor = gain_noise_floor
 
         # State
         self._model = None
@@ -534,6 +544,38 @@ class StreamingSTT:
             kept.append(seg.text.strip())
         return kept
 
+    def _normalize_gain(self, audio: np.ndarray) -> np.ndarray:
+        """Peak-normalize quiet speech up to a consistent level.
+
+        A low-output microphone makes the user shout because both the VAD and
+        Whisper only hear faint audio. Scaling the loudest sample up to
+        ``gain_target_peak`` of full-scale fixes that in software. A max-gain
+        cap and a noise-floor gate keep us from amplifying pure silence/hiss
+        into phantom speech.
+        """
+        if not self.gain_enabled or len(audio) == 0:
+            return audio
+
+        peak = int(np.max(np.abs(audio.astype(np.int32))))
+        # Essentially silence — amplifying this would just boost noise.
+        if peak < self.gain_noise_floor:
+            return audio
+
+        target = int(self.gain_target_peak * 32767)
+        # Already loud enough — leave it alone.
+        if peak >= target:
+            return audio
+
+        gain = min(self.gain_max, target / float(peak))
+        if gain <= 1.0:
+            return audio
+
+        amplified = audio.astype(np.float32) * gain
+        np.clip(amplified, -32768, 32767, out=amplified)
+        logger.debug("[STT] Applied mic gain x%.1f (peak %d -> %d)",
+                     gain, peak, int(peak * gain))
+        return amplified.astype(np.int16)
+
     @staticmethod
     def _compute_energy_db(audio: np.ndarray) -> float:
         """Compute the energy of an audio chunk in dB."""
@@ -556,6 +598,12 @@ class StreamingSTT:
             if len(self._audio_buffer) < self.SAMPLE_RATE * self.BYTES_PER_SAMPLE * 0.3:
                 return ""  # Less than 0.3s of audio — skip
             audio_data = bytes(self._audio_buffer)
+
+        # Normalize microphone gain up front so BOTH the cloud (Google) and
+        # local (Whisper) paths receive clearly-audible speech. This is the
+        # core fix for having to shout at a quiet mic.
+        audio_i16 = self._normalize_gain(np.frombuffer(audio_data, dtype=np.int16))
+        audio_data = audio_i16.tobytes()
 
         # Check for cloud availability
         try:

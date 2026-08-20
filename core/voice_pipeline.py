@@ -57,6 +57,10 @@ class VoicePipeline:
         conversation_timeout: float = 30.0,
         energy_silence_db: float = -45.0,
         vad_aggressiveness: int = 1,
+        gain_enabled: bool = True,
+        gain_target_peak: float = 0.95,
+        gain_max: float = 12.0,
+        gain_noise_floor: int = 200,
     ):
         # ── Configuration ────────────────────────────────────────
         self.follow_up_window = follow_up_window
@@ -79,6 +83,10 @@ class VoicePipeline:
             device=stt_device,
             energy_silence_db=energy_silence_db,
             vad_aggressiveness=vad_aggressiveness,
+            gain_enabled=gain_enabled,
+            gain_target_peak=gain_target_peak,
+            gain_max=gain_max,
+            gain_noise_floor=gain_noise_floor,
         )
 
         self.tts = InterruptibleTTS(
