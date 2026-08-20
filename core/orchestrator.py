@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
 
 from core.planner import Planner
-from core.memory import MemoryManager
+from core.memory import get_memory_manager
 from core.tool_manager import ToolManager
 from core.verification_agent import VerificationAgent
 from core.message_bus import get_message_bus
@@ -58,7 +58,7 @@ class Orchestrator:
     """
 
     def __init__(self):
-        self.memory = MemoryManager()
+        self.memory = get_memory_manager()
         self.tool_manager = ToolManager()
         self.planner = Planner()
         self.verification = VerificationAgent()
