@@ -20,6 +20,23 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger("jarvis.llm")
 
+
+def _safe(exc) -> str:
+    """Exception text with secrets stripped.
+
+    ``requests`` puts the full request URL into HTTPError messages, and
+    Google's endpoint carries the API key as a ``?key=`` query parameter — so
+    logging the raw exception writes the key to the console and any log file.
+
+    Redaction via the log *formatter* only applies once
+    ``install_log_redaction()`` has run and only to handlers that existed at
+    that moment, which isn't guaranteed for every entry point (scripts, tests,
+    anything that runs before kernel start). Redacting here means the secret
+    never enters the logging system in the first place.
+    """
+    from core.redaction import redact_text
+    return redact_text(str(exc))
+
 # ─── Configuration ────────────────────────────────────────────────
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
@@ -30,7 +47,9 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# llama-3.3-70b-versatile was retired by Groq and 404s on every call, which
+# cost four failed round-trips per agentic run before the fallback kicked in.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
@@ -63,7 +82,7 @@ def _unload_ollama_vram():
         )
         logger.info("[LLM] Unloaded Ollama model '%s' from VRAM (cloud is back online)", OLLAMA_MODEL)
     except Exception as e:
-        logger.debug("[LLM] Could not unload Ollama model (may not be loaded): %s", e)
+        logger.debug("[LLM] Could not unload Ollama model (may not be loaded): %s", _safe(e))
 
 
 # ─── API Keys & Connectivity ─────────────────────────────────────
@@ -561,7 +580,50 @@ def _ollama_generate(prompt: str, temperature: float = 0.0,
     return resp.json().get("response", "")
 
 
-# ─── OpenAI-Compatible Helpers (Groq, OpenRouter, etc.) ──────────
+def _filter_tools_for_openai_compat(tools: List[Dict], messages: List[Dict], max_tools: int = 20) -> List[Dict]:
+    """
+    Select the most relevant tools for a request to stay within provider tool
+    limits (e.g. Groq max 128 items and free-tier token-per-minute limits).
+    """
+    if not tools or len(tools) <= max_tools:
+        return tools
+
+    import re
+    context_text = " ".join(
+        str(m.get("content", ""))
+        for m in messages
+        if isinstance(m, dict)
+    ).lower()
+    words = set(w for w in re.findall(r'\b[a-zA-Z0-9_]{3,}\b', context_text))
+
+    core_tool_names = {
+        "open_application", "terminal_command", "run_python", "web_search",
+        "system_control", "media_control", "file_manager", "clipboard_tools",
+        "get_weather", "smartthings_control", "browser_navigate", "execute_terminal",
+        "read_code_file", "write_code_file"
+    }
+
+    scored = []
+    for t in tools:
+        fn = t.get("function", t)
+        name = fn.get("name", "").lower()
+        desc = fn.get("description", "").lower()
+        
+        score = 0
+        if any(c in name for c in core_tool_names):
+            score += 10
+            
+        for w in words:
+            if w in name:
+                score += 8
+            elif w in desc:
+                score += 3
+                
+        scored.append((score, t))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [t for _, t in scored[:max_tools]]
+
 
 def _openai_compat_chat(api_url: str, api_key: str, model: str,
                          messages: List[Dict], tools: Optional[List[Dict]] = None,
@@ -586,8 +648,9 @@ def _openai_compat_chat(api_url: str, api_key: str, model: str,
     }
 
     if tools:
+        filtered = _filter_tools_for_openai_compat(tools, messages, max_tools=20)
         openai_tools = []
-        for t in tools:
+        for t in filtered:
             func = t.get("function", t)
             openai_tools.append({
                 "type": "function",
@@ -599,9 +662,64 @@ def _openai_compat_chat(api_url: str, api_key: str, model: str,
             })
         body["tools"] = openai_tools
 
-    resp = requests.post(api_url, headers=headers, json=body, timeout=timeout)
-    resp.raise_for_status()
-    data = resp.json()
+    max_retries = 3
+    data = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(api_url, headers=headers, json=body, timeout=timeout)
+            if resp.status_code == 400 and "tool_use_failed" in resp.text:
+                try:
+                    err_data = resp.json().get("error", {})
+                    failed_gen = err_data.get("failed_generation", "")
+                    if failed_gen:
+                        import re
+                        m = re.search(r'<function=([a-zA-Z0-9_]+)\s*(?:>)?\s*(\{.*?\})', failed_gen, re.DOTALL)
+                        if m:
+                            fn_name = m.group(1)
+                            raw_args = m.group(2)
+                            try:
+                                parsed_args = json.loads(raw_args)
+                            except Exception:
+                                parsed_args = {}
+                            logger.debug("[LLM] Recovered tool call from Groq tool_use_failed: %s", fn_name)
+                            return {
+                                "content": "",
+                                "tool_calls": [{
+                                    "function": {
+                                        "name": fn_name,
+                                        "arguments": parsed_args
+                                    }
+                                }]
+                            }
+                        # If it's plain text without function tag, treat as content
+                        clean_text = re.sub(r'</?function.*?>?', '', failed_gen).strip()
+                        if clean_text:
+                            return {"content": clean_text}
+                except Exception as ex:
+                    logger.debug("[LLM] Could not recover from tool_use_failed: %s", ex)
+
+            if resp.status_code == 429:
+                if attempt == max_retries:
+                    resp.raise_for_status()
+                retry_after_str = resp.headers.get("retry-after", "")
+                try:
+                    wait = float(retry_after_str)
+                except ValueError:
+                    wait = min(2.0 * attempt, 6.0)
+                logger.warning("[LLM] OpenAI-compat/Groq 429 Rate Limit (attempt %d/%d). Retrying in %.1fs...", attempt, max_retries, wait)
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.RequestException as e:
+            if attempt == max_retries:
+                raise e
+            time.sleep(1.5)
+
+    if not data:
+        raise ConnectionError("OpenAI-compatible API returned empty response or exceeded retries.")
 
     choice = data.get("choices", [{}])[0]
     message = choice.get("message", {})
@@ -769,7 +887,7 @@ def llm_chat_stream(messages: List[Dict], tools: Optional[List[Dict]] = None,
             yield from _gemini_chat_stream(messages, tools, temperature, cloud_timeout)
             return
         except Exception as e:
-            logger.warning("[LLM] Cloud stream failed (%s), falling back to local", e)
+            logger.warning("[LLM] Cloud stream failed (%s), falling back to local", _safe(e))
             _internet_cache["available"] = False
             n = _backoff_state["consecutive_failures"] + 1
             _backoff_state["consecutive_failures"] = n
@@ -785,7 +903,7 @@ def llm_chat_stream(messages: List[Dict], tools: Optional[List[Dict]] = None,
                 messages, tools, temperature, min(timeout, 30))
             return
         except Exception as e:
-            logger.warning("[LLM] Groq stream failed (%s), trying next provider", e)
+            logger.warning("[LLM] Groq stream failed (%s), trying next provider", _safe(e))
 
     # ── OpenRouter (free community models) ───────────────────────
     or_key = _get_openrouter_api_key()
@@ -798,7 +916,7 @@ def llm_chat_stream(messages: List[Dict], tools: Optional[List[Dict]] = None,
                                "X-Title": "J.A.R.V.I.S."})
             return
         except Exception as e:
-            logger.warning("[LLM] OpenRouter stream failed (%s), trying next provider", e)
+            logger.warning("[LLM] OpenRouter stream failed (%s), trying next provider", _safe(e))
 
     # Cloud-only mode: never touch Ollama / VRAM
     if PREFER_CLOUD_ONLY:
@@ -810,8 +928,8 @@ def llm_chat_stream(messages: List[Dict], tools: Optional[List[Dict]] = None,
     try:
         yield from _ollama_chat_stream(messages, tools, temperature, timeout)
     except Exception as e:
-        logger.error("[LLM] Both cloud and local stream failed: %s", e)
-        yield f"LLM stream failed: {e}"
+        logger.error("[LLM] Both cloud and local stream failed: %s", _safe(e))
+        yield f"LLM stream failed: {_safe(e)}"
 
 # ─── Public API ──────────────────────────────────────────────────
 
@@ -847,7 +965,7 @@ def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
                 if has_groq():
                     prefer = "groq"
             else:
-                logger.warning("[LLM] Claude call failed (%s), falling back to other providers", e)
+                logger.warning("[LLM] Claude call failed (%s), falling back to other providers", _safe(e))
 
     # ── Groq preferred (or rerouted here after Claude ran out of credits) ──
     if prefer == "groq":
@@ -860,7 +978,7 @@ def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
                 logger.debug("[LLM] Groq (preferred) call succeeded")
                 return result
             except Exception as e:
-                logger.warning("[LLM] Groq (preferred) failed (%s), falling back", e)
+                logger.warning("[LLM] Groq (preferred) failed (%s), falling back", _safe(e))
 
     api_key = _get_api_key()
     if api_key:
@@ -872,7 +990,7 @@ def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
             _internet_cache["available"] = True
             return result
         except Exception as e:
-            logger.warning("[LLM] Cloud call failed (%s), attempting local fallback", e)
+            logger.warning("[LLM] Cloud call failed (%s), attempting local fallback", _safe(e))
 
     # ── Groq (free, ultra-fast LPU inference) ────────────────────
     groq_key = _get_groq_api_key()
@@ -884,7 +1002,7 @@ def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
             logger.debug("[LLM] Groq chat call succeeded")
             return result
         except Exception as e:
-            logger.warning("[LLM] Groq chat failed (%s), trying next provider", e)
+            logger.warning("[LLM] Groq chat failed (%s), trying next provider", _safe(e))
 
     # ── OpenRouter (free community models) ───────────────────────
     or_key = _get_openrouter_api_key()
@@ -898,7 +1016,7 @@ def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
             logger.debug("[LLM] OpenRouter chat call succeeded")
             return result
         except Exception as e:
-            logger.warning("[LLM] OpenRouter chat failed (%s), trying next provider", e)
+            logger.warning("[LLM] OpenRouter chat failed (%s), trying next provider", _safe(e))
 
     # Cloud-only mode: never touch Ollama / VRAM
     if PREFER_CLOUD_ONLY:
@@ -914,7 +1032,7 @@ def llm_chat(messages: List[Dict], tools: Optional[List[Dict]] = None,
         _internet_cache["penalty_until"] = time.time() + 30.0
         return result
     except Exception as e:
-        logger.error("[LLM] Both cloud and local LLM failed: %s", e)
+        logger.error("[LLM] Both cloud and local LLM failed: %s", _safe(e))
         _internet_cache["available"] = None
         _internet_cache["penalty_until"] = 0
         # Flag so agentic callers can distinguish a provider failure from a real
@@ -939,7 +1057,7 @@ def llm_generate(prompt: str, temperature: float = 0.0,
             _internet_cache["available"] = True
             return result
         except Exception as e:
-            logger.warning("[LLM] Cloud generate failed (%s), attempting local fallback", e)
+            logger.warning("[LLM] Cloud generate failed (%s), attempting local fallback", _safe(e))
 
     # ── Groq (free, ultra-fast LPU inference) ────────────────────
     groq_key = _get_groq_api_key()
@@ -951,7 +1069,7 @@ def llm_generate(prompt: str, temperature: float = 0.0,
             logger.debug("[LLM] Groq generate call succeeded")
             return result
         except Exception as e:
-            logger.warning("[LLM] Groq generate failed (%s), trying next provider", e)
+            logger.warning("[LLM] Groq generate failed (%s), trying next provider", _safe(e))
 
     # ── OpenRouter (free community models) ───────────────────────
     or_key = _get_openrouter_api_key()
@@ -965,7 +1083,7 @@ def llm_generate(prompt: str, temperature: float = 0.0,
             logger.debug("[LLM] OpenRouter generate call succeeded")
             return result
         except Exception as e:
-            logger.warning("[LLM] OpenRouter generate failed (%s), trying next provider", e)
+            logger.warning("[LLM] OpenRouter generate failed (%s), trying next provider", _safe(e))
 
     # Cloud-only mode: never touch Ollama / VRAM
     if PREFER_CLOUD_ONLY:
@@ -981,7 +1099,7 @@ def llm_generate(prompt: str, temperature: float = 0.0,
         _internet_cache["penalty_until"] = time.time() + 30.0
         return result
     except Exception as e:
-        logger.error("[LLM] Both cloud and local generate failed: %s", e)
+        logger.error("[LLM] Both cloud and local generate failed: %s", _safe(e))
         _internet_cache["available"] = None
         _internet_cache["penalty_until"] = 0
         return "I'm temporarily unable to connect to the AI server. Please check your internet connection and try again, sir."
@@ -1001,7 +1119,7 @@ def llm_vision_generate(prompt: str, image_base64: str,
             _backoff_state["consecutive_failures"] = 0
             return result
         except Exception as e:
-            logger.warning("[LLM] Cloud Vision generate failed (%s), attempting local fallback", e)
+            logger.warning("[LLM] Cloud Vision generate failed (%s), attempting local fallback", _safe(e))
 
     if PREFER_CLOUD_ONLY:
         logger.warning("[LLM] PREFER_CLOUD_ONLY=true — not falling back to Ollama")
@@ -1021,5 +1139,5 @@ def llm_vision_generate(prompt: str, image_base64: str,
         logger.debug("[LLM] Local Ollama Vision generate succeeded")
         return resp.json().get("response", "")
     except Exception as e:
-        logger.error("[LLM] Both cloud and local vision generate failed: %s", e)
+        logger.error("[LLM] Both cloud and local vision generate failed: %s", _safe(e))
         return "I'm temporarily unable to analyze images. Please check your internet connection and ensure Ollama is running."

@@ -32,6 +32,7 @@ from core.memory import get_memory_manager
 from core.tool_manager import ToolManager
 from core.verification_agent import VerificationAgent
 from core.message_bus import get_message_bus
+from core.security import is_dangerous_tool
 
 logger = logging.getLogger("jarvis.orchestrator")
 
@@ -71,6 +72,14 @@ class Orchestrator:
         # Autonomous multi-step reasoning for open-ended goals. On by default;
         # set JARVIS_AGENTIC_MODE=0 to force the classic single-shot pipeline.
         self.agentic_enabled = os.environ.get("JARVIS_AGENTIC_MODE", "1") != "0"
+
+        # Autonomy policy for destructive tools on the single-shot path. Shares
+        # the same env var as the agentic loop so both paths obey one setting:
+        #   "guarded" (default) — hold dangerous tools for spoken confirmation
+        #   "full"              — execute everything, no confirmation
+        self.autonomy = os.environ.get("JARVIS_AGENTIC_AUTONOMY", "guarded").lower()
+        # A dangerous tool call held back awaiting the user's "yes".
+        self._pending_action: Optional[dict] = None
 
         tool_names = list(self.tool_manager.tools.keys())
         print(f"[Orchestrator] Initialized with {len(tool_names)} tools: {tool_names}")
@@ -117,7 +126,14 @@ class Orchestrator:
             pass
 
         try:
-            # 0. Fast Path for instant intent execution (Bypass LLM)
+            # 0a. A pending dangerous action takes priority: a bare "yes"/"no"
+            #     here is answering the confirmation prompt, not a new command.
+            confirmed = self._resolve_pending_confirmation(text)
+            if confirmed:
+                self._store_and_learn(text, confirmed)
+                return confirmed
+
+            # 0b. Fast Path for instant intent execution (Bypass LLM)
             fast_action = self._check_fast_path(text)
             if fast_action:
                 try:
@@ -259,6 +275,27 @@ class Orchestrator:
                 args = func_info.get("arguments", {})
                 if isinstance(args, str):
                     args = json.loads(args)
+
+                # ── Safety gate: hold destructive tools for confirmation ──
+                # The @tool safety flags were previously enforced only in the
+                # agentic loop, so this path ran flagged tools unchecked.
+                if self._should_confirm(tool_name):
+                    self._pending_action = {"tool": tool_name, "args": args}
+                    logger.warning("[Orchestrator] Holding dangerous tool '%s' for confirmation.", tool_name)
+                    self.bus.publish("action_pending_confirmation", "orchestrator",
+                                     {"tool": tool_name, "args": str(args)})
+                    results.append({
+                        "tool": tool_name,
+                        "arguments": args,
+                        "result": (
+                            f"BLOCKED: '{tool_name}' is potentially destructive and was NOT executed. "
+                            f"Tell the user plainly what this action would do and ask them to confirm "
+                            f"with 'yes' before it can proceed."
+                        ),
+                        "verified_success": False,
+                        "pending_confirmation": True,
+                    })
+                    continue
 
                 result = self.tool_manager.execute_tool(tool_name, args)
                 success = self.verification.verify(tool_name, str(result))
@@ -438,6 +475,69 @@ class Orchestrator:
 
     # Signals that a request is an open-ended, multi-step goal best handled by
     # the adaptive ReAct loop rather than a single-shot tool selection.
+    # Short replies that confirm or cancel a held-back dangerous action.
+    _AFFIRMATIONS = frozenset({
+        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "confirmed",
+        "do it", "go ahead", "proceed", "affirmative", "yes please", "please do",
+        "continue", "approved", "approve",
+    })
+    _DENIALS = frozenset({
+        "no", "nope", "nah", "cancel", "stop", "don't", "dont", "abort",
+        "never mind", "nevermind", "forget it", "no thanks", "negative",
+    })
+
+    def _should_confirm(self, tool_name: str) -> bool:
+        """Whether this tool must be confirmed before running on the single-shot path."""
+        if self.autonomy == "full":
+            return False
+        meta = self.tool_manager.tools.get(tool_name, {})
+        return is_dangerous_tool(tool_name, meta)
+
+    def _resolve_pending_confirmation(self, text: str) -> Optional[dict]:
+        """Handle a bare 'yes'/'no' answering a held-back dangerous action.
+
+        Returns a response dict when ``text`` resolved a pending action, or
+        None when there was nothing pending (or the reply wasn't a yes/no, in
+        which case the pending action is dropped rather than left to fire
+        later against an unrelated command).
+        """
+        pending = self._pending_action
+        if not pending:
+            return None
+
+        reply = re.sub(r"[\.!\?]+$", "", text.lower().strip())
+        tool_name, args = pending["tool"], pending["args"]
+
+        if reply in self._AFFIRMATIONS:
+            self._pending_action = None
+            logger.info("[Orchestrator] User confirmed '%s' — executing.", tool_name)
+            result = self.tool_manager.execute_tool(tool_name, args)
+            success = self.verification.verify(tool_name, str(result))
+            self.bus.publish("tool_executed", "orchestrator",
+                             {"tool": tool_name, "success": success})
+            return {
+                "success": success,
+                "response": str(result) if success else f"That didn't work, sir: {result}",
+                "response_stream": None,
+                "action": f"Confirmed: {tool_name}",
+            }
+
+        if reply in self._DENIALS:
+            self._pending_action = None
+            logger.info("[Orchestrator] User cancelled '%s'.", tool_name)
+            return {
+                "success": True,
+                "response": "Cancelled, sir. I haven't touched anything.",
+                "response_stream": None,
+                "action": f"Cancelled: {tool_name}",
+            }
+
+        # Anything else means they've moved on — drop the stale pending action
+        # so a later stray "yes" can't trigger it.
+        logger.info("[Orchestrator] Dropping stale pending action '%s'.", tool_name)
+        self._pending_action = None
+        return None
+
     _AGENTIC_SIGNALS = (
         " and then ", " then ", " after that ", " once you ", " after you ",
         " for each ", " for every ", " keep ", " until ", " one by one ",

@@ -20,7 +20,11 @@ from core.tool_manager import tool
             }
         },
         "required": ["command"]
-    }
+    },
+    # Arbitrary shell execution (shell=True) — strictly more powerful than any
+    # individually gated tool, so it must be confirmed before it runs.
+    requires_confirmation=True,
+    is_dangerous=True,
 )
 def execute_terminal(command: str) -> str:
     try:
@@ -44,7 +48,10 @@ def execute_terminal(command: str) -> str:
             }
         },
         "required": ["script"]
-    }
+    },
+    # Arbitrary code execution — gate it like execute_terminal.
+    requires_confirmation=True,
+    is_dangerous=True,
 )
 def run_powershell(script: str) -> str:
     try:

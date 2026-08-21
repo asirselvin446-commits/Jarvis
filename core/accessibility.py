@@ -111,7 +111,7 @@ $elements | ConvertTo-Json -Depth 5
     try:
         result = subprocess.run(
             ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-            capture_output=True, text=True, timeout=15
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
         )
 
         if result.returncode != 0:

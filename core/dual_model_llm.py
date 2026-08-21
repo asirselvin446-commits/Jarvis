@@ -7,6 +7,7 @@ Includes caching, fallback, and cost optimization.
 import os
 import json
 import logging
+from core.redaction import redact_text
 import hashlib
 import time
 from typing import List, Dict, Any, Optional, Tuple
@@ -111,7 +112,7 @@ class DualModelLLMProvider:
             logger.info(f"Cloud model availability: {available}")
             return available
         except Exception as e:
-            logger.warning(f"Cloud model check failed: {e}")
+            logger.warning(f"Cloud model check failed: {redact_text(str(e))}")
             return False
     
     def _check_local_availability(self) -> bool:
@@ -185,7 +186,7 @@ class DualModelLLMProvider:
                 self._cache_response(cache_key, response)
             
         except Exception as e:
-            logger.error(f"LLM call failed ({model_type.value}): {e}")
+            logger.error(f"LLM call failed ({model_type.value}): {redact_text(str(e))}")
             self.metrics.fallback_count += 1
             
             # Try fallback
@@ -319,7 +320,7 @@ class DualModelLLMProvider:
                 "choices": [{"message": {"content": text}}],
             }
         except Exception as e:
-            logger.error(f"Failed to parse cloud response: {e}")
+            logger.error(f"Failed to parse cloud response: {redact_text(str(e))}")
             raise
     
     def _call_local_llm(

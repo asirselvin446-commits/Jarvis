@@ -9,6 +9,7 @@ brittle JSON text parsing. This is the gold-standard agentic pattern.
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -56,15 +57,6 @@ class ReActLoop:
     # How many times to retry a transient LLM/provider failure before giving up.
     MAX_LLM_RETRIES = 3
 
-    # Substrings in a tool name that mark it as potentially destructive/irreversible.
-    # Catches high-risk tools that were never given an explicit is_dangerous flag.
-    _DANGEROUS_NAME_HINTS = (
-        "delete", "remove", "kill", "uninstall", "format", "wipe", "erase",
-        "shutdown", "reboot", "restart", "send", "email", "message", "whatsapp",
-        "post", "publish", "buy", "purchase", "pay", "transfer", "commit", "push",
-        "terminal", "powershell", "shell", "exec", "run_python", "write_code",
-    )
-
     def __init__(self, max_iterations: int = 10,
                  registry: Optional[AgenticToolRegistry] = None,
                  autonomy: Optional[str] = None):
@@ -94,17 +86,72 @@ class ReActLoop:
     def _is_dangerous(self, tool_name: str) -> bool:
         """Decide whether a tool needs explicit confirmation before running.
 
-        Combines the declared safety flags (``is_dangerous`` /
-        ``requires_confirmation`` from the @tool decorator) with a name-based
-        heuristic, since most destructive tools were never flagged.
+        Delegates to :func:`core.security.is_dangerous_tool` so this path and
+        the single-shot Orchestrator path share one definition of "dangerous".
         """
+        from core.security import is_dangerous_tool
         meta = self.registry.get_meta(tool_name) if hasattr(self.registry, "get_meta") else {}
-        if meta.get("is_dangerous") or meta.get("requires_confirmation"):
-            return True
-        low = tool_name.lower()
-        return any(hint in low for hint in self._DANGEROUS_NAME_HINTS)
+        return is_dangerous_tool(tool_name, meta)
 
     def run(self, goal: str, context: str = "") -> AgenticResult:
+        """Run the agentic loop, then credit/debit any skills it consulted.
+
+        Wrapping ``_run`` keeps outcome recording in one place: the inner loop
+        has several exit paths (done, stopped, provider dead, loop guard) and
+        every one of them should count toward a skill's track record.
+        """
+        result = self._run(goal, context)
+        try:
+            self._record_skill_outcomes(result)
+        except Exception as e:
+            logger.debug("[ReActLoop] Skill outcome recording failed: %s", e)
+        result.response = self._guard_response(result.response)
+        return result
+
+    @staticmethod
+    def _guard_response(response: str) -> str:
+        """Refuse to hand back a response the model degenerated into a loop.
+
+        A model stuck echoing one fragment burns its whole output budget on it.
+        On a text surface that is ugly; on Jarvis it is worse, because the
+        response goes to TTS and gets *spoken* — minutes of the same sentence,
+        with the barge-in handler fighting it. Catching it here costs one cheap
+        scan and turns a runaway into one honest sentence.
+        """
+        try:
+            from core.vendor.hermes.repetition_guard import is_repetition_dominated
+            if is_repetition_dominated(response):
+                logger.warning("[ReActLoop] Repetition-dominated response suppressed (%d chars).",
+                               len(response or ""))
+                return ("I got stuck repeating myself while summarising that, sir, so I've "
+                        "cut the reply short. The steps I ran are in the log.")
+        except Exception as e:
+            logger.debug("[ReActLoop] Repetition guard unavailable: %s", e)
+        return response
+
+    @staticmethod
+    def _record_skill_outcomes(result: AgenticResult) -> None:
+        """Mark every skill read during this run as having succeeded or failed.
+
+        This is what lets the curator retire a skill that has quietly gone
+        stale: it stops matching reality, tasks that use it start failing, and
+        the failure ratio crosses the threshold.
+        """
+        from core.skill_library import record_outcome, slugify
+
+        consulted = set()
+        for step in result.steps:
+            if step.tool_name != "read_skill":
+                continue
+            name = (step.tool_args or {}).get("name")
+            if name:
+                consulted.add(slugify(str(name)))
+
+        for slug in consulted:
+            # read_skill already counted the use; this only records the verdict.
+            record_outcome(slug, success=bool(result.success))
+
+    def _run(self, goal: str, context: str = "") -> AgenticResult:
         """
         Main execution loop for an open-ended agentic goal.
         Uses native function calling for reliable tool invocation.
@@ -168,8 +215,8 @@ class ReActLoop:
                 if result is not None and not result.get("provider_error"):
                     break
                 if attempt < self.MAX_LLM_RETRIES:
-                    wait = min(2 ** attempt, 8)
-                    self._notify_ui(goal, f"AI is busy — retrying in {wait}s…", percent)
+                    wait = self._retry_delay(attempt + 1, result)
+                    self._notify_ui(goal, f"AI is busy — retrying in {wait:.0f}s…", percent)
                     logger.info("[ReActLoop] Provider busy; backing off %ds (attempt %d/%d)",
                                 wait, attempt + 1, self.MAX_LLM_RETRIES)
                     time.sleep(wait)
@@ -197,16 +244,11 @@ class ReActLoop:
             content = (result.get("content") or "").strip()
 
             if not tool_calls:
-                # No tool calls = LLM thinks the task is done, returned a text response
-                final_response = content or self._synthesize_summary(goal, scratchpad)
+                # No tool calls = the model believes it's finished. Verify that
+                # against the goal before echoing its confidence to the user.
                 self._notify_ui(goal, "Done", 100)
                 logger.info("[ReActLoop] Finished at iteration %d with text response", iteration)
-                return AgenticResult(
-                    success=self._overall_success(scratchpad),
-                    response=final_response,
-                    steps=scratchpad,
-                    total_time=time.time() - start_time
-                )
+                return self._final_result(goal, scratchpad, content, start_time)
 
             # Execute each tool call the model requested this turn
             for tc in tool_calls:
@@ -229,12 +271,9 @@ class ReActLoop:
                     # If the model already ignored one nudge, stop wasting turns.
                     if repeats > self.MAX_REPEAT + 1:
                         logger.warning("[ReActLoop] Nudge ignored — ending workflow.")
-                        return AgenticResult(
-                            success=bool(scratchpad) and self._overall_success(scratchpad),
-                            response=self._synthesize_summary(goal, scratchpad),
-                            steps=scratchpad,
-                            total_time=time.time() - start_time,
-                        )
+                        # Stuck in a repeat loop, so the goal is very unlikely to
+                        # be met; use the same completion check as every exit.
+                        return self._final_result(goal, scratchpad, "", start_time)
                     messages.append({
                         "role": "user",
                         "content": (
@@ -298,7 +337,7 @@ class ReActLoop:
                 # and adapts instead of assuming the step worked.
                 verdict = {True: "SUCCEEDED", False: "FAILED", None: "UNCLEAR"}[succeeded]
                 messages.append({"role": "assistant",
-                                 "content": f"Called {tool_name}({json.dumps(tool_args, default=str)})"})
+                                 "content": f"Action: {tool_name}({json.dumps(tool_args, default=str)})"})
                 messages.append({"role": "user",
                                  "content": f"Tool '{tool_name}' {verdict}. It returned:\n"
                                             f"{str(observation)[:1500]}"})
@@ -314,15 +353,12 @@ class ReActLoop:
                 except Exception:
                     pass
 
-        # Max iterations reached — synthesize a clean summary of what happened.
+        # Max iterations reached — summarize honestly. Running out of budget is
+        # itself a strong signal the goal wasn't reached, so it goes through the
+        # same completion check rather than defaulting to success.
         self._notify_ui(goal, "Wrapping up", 100)
         logger.info("[ReActLoop] Reached max iterations (%d)", self.max_iterations)
-        return AgenticResult(
-            success=bool(scratchpad) and self._overall_success(scratchpad),
-            response=self._synthesize_summary(goal, scratchpad),
-            steps=scratchpad,
-            total_time=time.time() - start_time
-        )
+        return self._final_result(goal, scratchpad, "", start_time)
 
     @staticmethod
     def _verify_observation(observation: Any) -> Optional[bool]:
@@ -361,6 +397,63 @@ class ReActLoop:
             return False
         return first_ok < first_fail
 
+    # Each action is recorded in the transcript as "Action: tool(args)" (and
+    # historically "Called tool(args)"). The model sometimes parrots that line
+    # back as its closing message. It is internal bookkeeping, never an answer.
+    _BOOKKEEPING_RE = re.compile(
+        r"^\s*(?:called|action:?)\s+\w+\s*\(.*\)\s*\.?\s*$",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @classmethod
+    def _is_bookkeeping_echo(cls, content: str) -> bool:
+        """Whether a model message is just an echo of the loop's own action log."""
+        return bool(content) and bool(cls._BOOKKEEPING_RE.match(content.strip()))
+
+    def _goal_achieved(self, goal: str, scratchpad: List[StepResult]) -> Optional[bool]:
+        """Ask the model whether the goal itself was actually met.
+
+        Per-step verification only answers "did any action fail?" — a run can
+        finish with every step fine and still not have done what was asked
+        (e.g. opening Notepad but never typing the text). This is the only
+        check that looks at goal completion, so a run cannot report success
+        merely because nothing errored.
+
+        Returns True/False, or None when the judgement can't be made (the
+        caller then falls back to the per-step heuristic rather than guessing).
+        """
+        if not scratchpad:
+            return None
+
+        marker = {True: "SUCCEEDED", False: "FAILED", None: "UNCLEAR"}
+        steps_text = "\n".join(
+            f"- {s.tool_name}({json.dumps(s.tool_args, default=str)[:120]}) "
+            f"[{marker[s.succeeded]}]: {str(s.observation)[:200]}"
+            for s in scratchpad[-10:]
+        )
+        try:
+            verdict = llm_chat(
+                [
+                    {"role": "system", "content":
+                        "You judge whether an automated agent actually completed the user's "
+                        "goal. Consider ONLY the evidence in the action log. Every part of the "
+                        "goal must be done. Opening or preparing something is NOT the same as "
+                        "completing the requested work. Answer with exactly one word: YES if "
+                        "the whole goal was achieved, NO otherwise."},
+                    {"role": "user", "content":
+                        f"Goal: {goal}\n\nAction log:\n{steps_text}\n\nWas the goal achieved?"},
+                ],
+                temperature=0.0, timeout=30,
+            )
+            text = (verdict.get("content") or "").strip().lower()
+            if text.startswith("yes"):
+                return True
+            if text.startswith("no"):
+                return False
+        except Exception as e:
+            logger.debug("[ReActLoop] Goal-completion check failed: %s", e)
+        return None
+
     @staticmethod
     def _overall_success(scratchpad: List[StepResult]) -> bool:
         """Whether the run as a whole should be reported as successful.
@@ -368,6 +461,10 @@ class ReActLoop:
         A ReAct run often includes a failed step that a later step recovers
         from, so one failure is not fatal. But if the final action failed, or
         every action failed, the goal was not achieved — say so.
+
+        This is only the per-step view; callers combine it with
+        :meth:`_goal_achieved`, which is what catches a run where nothing
+        errored but the goal still wasn't met.
         """
         real = [s for s in scratchpad if s.tool_name != "ERROR"]
         if not real:
@@ -377,6 +474,43 @@ class ReActLoop:
         if all(s.succeeded is False for s in real):
             return False
         return True
+
+    def _final_result(self, goal: str, scratchpad: List[StepResult],
+                      content: str, start_time: float) -> AgenticResult:
+        """Build the run's result, judging goal completion before claiming success.
+
+        ``content`` is the model's own closing message, used as the spoken
+        response unless it's empty or just an echo of the action log.
+        """
+        if self._is_bookkeeping_echo(content):
+            logger.info("[ReActLoop] Discarding bookkeeping echo as final response: %r", content)
+            content = ""
+
+        achieved = self._goal_achieved(goal, scratchpad)
+        per_step = self._overall_success(scratchpad)
+        # An explicit "no" overrides the per-step view; None falls back to it.
+        success = per_step if achieved is None else (achieved and per_step)
+
+        response = content or self._synthesize_summary(goal, scratchpad)
+        if achieved is False:
+            logger.info("[ReActLoop] Goal not achieved despite %d step(s).", len(scratchpad))
+            # Don't let a cheerful closing message imply the job is done.
+            response = self._incomplete_summary(goal, scratchpad, response)
+
+        return AgenticResult(
+            success=success,
+            response=response,
+            steps=scratchpad,
+            total_time=time.time() - start_time,
+        )
+
+    def _incomplete_summary(self, goal: str, scratchpad: List[StepResult],
+                            drafted: str) -> str:
+        """Phrase the outcome honestly when the goal was not fully achieved."""
+        done = [s.tool_name for s in scratchpad if s.succeeded is not False]
+        tail = f" I got as far as: {', '.join(dict.fromkeys(done))}." if done else ""
+        return (f"I wasn't able to finish that, sir.{tail} "
+                f"The goal was: {goal}. Tell me how you'd like me to proceed.")
 
     @staticmethod
     def _deterministic_summary(scratchpad: List[StepResult]) -> str:
@@ -433,6 +567,46 @@ class ReActLoop:
                     f"Last result: {str(last.observation)[:200]}")
         return f"I completed {len(scratchpad)} step(s). Last result: {str(last.observation)[:200]}"
 
+    @staticmethod
+    def _retry_delay(attempt: int, result: Any) -> float:
+        """How long to wait before retrying a failed provider call.
+
+        Prefers the provider's own Retry-After when it sent one, otherwise
+        jittered exponential backoff. The jitter matters because Jarvis runs
+        several agentic surfaces (voice, gateway, cron, sub-agents) that can
+        hit the same rate-limited provider at once — undithered backoff makes
+        them all retry on the same tick and re-trigger the limit.
+        """
+        from core.vendor.hermes.retry_utils import jittered_backoff, parse_retry_after_seconds
+
+        if isinstance(result, dict):
+            for key in ("headers", "response_headers"):
+                retry_after = parse_retry_after_seconds(result.get(key))
+                if retry_after:
+                    return min(float(retry_after), 60.0)
+
+        return jittered_backoff(attempt, base_delay=2.0, max_delay=16.0, jitter_ratio=0.5)
+
+    @staticmethod
+    def _skills_section(goal: str) -> str:
+        """Procedural memory: skills Jarvis previously wrote for tasks like this.
+
+        Only names and one-line descriptions are inlined; the model calls
+        read_skill for the full steps, so a large library costs nothing here.
+        """
+        try:
+            from core.skill_library import skills_context_block
+            block = skills_context_block(goal, limit=4)
+        except Exception as e:
+            logger.debug("[ReActLoop] Skill retrieval unavailable: %s", e)
+            return ""
+        if not block:
+            return ""
+        return (
+            "\nRELEVANT SKILLS (procedures you wrote earlier — call read_skill "
+            "for the full steps BEFORE improvising):\n" + block + "\n"
+        )
+
     def _build_system_prompt(self, goal: str, context: str) -> str:
         """Build the system prompt for the agentic loop."""
         return (
@@ -457,12 +631,17 @@ class ReActLoop:
             "tools — they are unreliable and not wanted.\n"
             "9. Never claim success you haven't verified. Only report a task done when a tool "
             "result confirms it; if a result is an error, say so plainly.\n"
+            "10. SKILL MEMORY: if a skill is listed below as relevant, call `read_skill` on it "
+            "before improvising — it is your own record of what actually worked. After you "
+            "solve something that took real figuring out (a non-obvious sequence, a workaround, "
+            "an app quirk), call `create_skill` to save the procedure. Don't save the trivial.\n"
             + (
                 "7. SAFETY: destructive or irreversible actions (deleting, sending messages/email, "
                 "killing processes, running shell commands, purchases) are guarded. If one is blocked, "
                 "do NOT retry it — finish and clearly ask the user to confirm that specific action.\n"
                 if self.autonomy != "full" else ""
             )
+            + self._skills_section(goal)
             + f"\nCONTEXT (memory, screen state, conversation):\n{context or 'None'}\n"
         )
 

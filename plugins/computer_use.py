@@ -25,7 +25,7 @@ from core.tool_manager import tool
 # ─── Config ──────────────────────────────────────────────────────
 OLLAMA_VISION_URL = "http://localhost:11434/api/generate"
 VISION_MODEL = "qwen2.5vl:3b"
-MAX_STEPS = 10          # Safety limit: max actions per task
+MAX_STEPS = 15          # Safety limit: max actions per task (increased for complex workflows)
 STEP_DELAY = 1.0        # Seconds to wait between actions for UI to update
 VISION_RETRIES = 2      # Retry vision parsing this many times before giving up
 SCREENSHOT_QUALITY = 70 # JPEG quality for faster base64 transmission
@@ -60,7 +60,47 @@ def _get_screen_size() -> tuple:
 
 
 def _ask_vision(screenshot_b64: str, prompt: str) -> str:
-    """Send a screenshot + prompt to the vision model and get a response."""
+    """Send a screenshot + prompt to the vision model (Gemini Cloud or Local Ollama) and get a response."""
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if api_key:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={api_key}"
+            body = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": prompt},
+                            {
+                                "inline_data": {
+                                    "mime_type": "image/jpeg",
+                                    "data": screenshot_b64
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.0
+                }
+            }
+            resp = requests.post(url, json=body, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    for part in parts:
+                        if "text" in part:
+                            return part["text"]
+        except Exception as e:
+            # The Gemini URL carries the API key as ?key=, and requests puts the
+            # full URL into HTTPError messages — redact before printing.
+            from core.redaction import redact_text
+            print(f"[ComputerUse] Gemini Vision call failed ({redact_text(str(e))}), "
+                  f"attempting local Ollama fallback")
+
+    # Local Ollama Fallback
     payload = {
         "model": VISION_MODEL,
         "prompt": prompt,
@@ -73,7 +113,7 @@ def _ask_vision(screenshot_b64: str, prompt: str) -> str:
     }
     
     try:
-        resp = requests.post(OLLAMA_VISION_URL, json=payload, timeout=120)
+        resp = requests.post(OLLAMA_VISION_URL, json=payload, timeout=60)
         if resp.status_code == 200:
             return resp.json().get("response", "")
         return f"Vision API Error: {resp.status_code}"
@@ -152,7 +192,13 @@ def _execute_action(action: dict) -> str:
                 pyautogui.click(x, y)
                 time.sleep(0.3)
             text = action.get("text", "")
-            pyautogui.typewrite(text, interval=0.03) if text.isascii() else pyautogui.write(text)
+            # Paste for all text, not just Unicode: per-character typing drops
+            # and repeats keys at speed and swallows newlines, so multi-line
+            # content (and anything long) arrived corrupted.
+            from core.universal_actions import UniversalActions
+            result = UniversalActions.type_text(text)
+            if not result.success:
+                return f"Failed to type text: {result.failure_reason}"
             return f"Typed: '{text}'"
         
         elif action_type == "hotkey":
@@ -186,6 +232,24 @@ def _execute_action(action: dict) -> str:
             summary = action.get("summary", "Task completed.")
             return f"DONE: {summary}"
         
+        elif action_type == "drag":
+            x1, y1 = int(action["x"]), int(action["y"])
+            x2, y2 = int(action["to_x"]), int(action["to_y"])
+            pyautogui.moveTo(x1, y1)
+            time.sleep(0.1)
+            pyautogui.mouseDown()
+            time.sleep(0.1)
+            pyautogui.moveTo(x2, y2, duration=0.5)
+            pyautogui.mouseUp()
+            return f"Dragged from ({x1},{y1}) to ({x2},{y2})"
+        
+        elif action_type == "select_text":
+            x, y = int(action["x"]), int(action["y"])
+            pyautogui.click(x, y)
+            time.sleep(0.1)
+            pyautogui.hotkey('ctrl', 'a')
+            return f"Selected all text at ({x},{y})"
+        
         elif action_type == "error":
             return f"Vision parsing error: {action.get('detail', 'unknown')}"
         
@@ -197,7 +261,21 @@ def _execute_action(action: dict) -> str:
 
 
 def _get_accessibility_context() -> str:
-    """Get UI element names from the accessibility tree for more reliable interaction."""
+    """Describe on-screen UI elements, with exact coordinates, for the vision model.
+
+    Two sources, in order of reliability:
+
+    1. The Windows UI Automation tree — exact, but native-Win32 only. Electron
+       and Chromium apps (VS Code, Discord, Slack, WhatsApp Desktop, Spotify)
+       expose nothing here unless assistive tech is already attached, and the
+       shell process reports no main window either.
+    2. OCR with per-line bounding boxes — works on anything that renders text,
+       so it covers exactly the apps UI Automation misses.
+
+    Without the OCR fallback the model gets no coordinates at all on those
+    apps and has to eyeball them from the screenshot, which is where most
+    misclicks come from.
+    """
     try:
         from core.accessibility import get_clickable_elements, format_element_summary
         elements = get_clickable_elements()
@@ -205,7 +283,28 @@ def _get_accessibility_context() -> str:
             summary = format_element_summary(elements, max_items=20)
             return f"\nAccessibility-detected UI elements (with exact screen coordinates):\n{summary}\n"
     except Exception as e:
-        print(f"[ComputerUse] Accessibility fallback: {e}")
+        print(f"[ComputerUse] Accessibility tree unavailable: {e}")
+
+    # Fallback: OCR-derived text elements.
+    try:
+        from core.ocr_engine import semantic_ocr_screen
+        els = semantic_ocr_screen()
+        if els:
+            # Clickable-looking elements first; they're the useful targets.
+            ranked = sorted(els, key=lambda e: (not e.clickable, e.center_y, e.center_x))
+            lines = [
+                f'  [{e.category}] "{e.text}" at ({e.center_x}, {e.center_y})'
+                for e in ranked[:25] if e.text
+            ]
+            if lines:
+                return (
+                    "\nOCR-detected on-screen text (with exact screen coordinates). "
+                    "The accessibility tree was empty for this app, so these are the "
+                    "most reliable coordinates available:\n" + "\n".join(lines) + "\n"
+                )
+    except Exception as e:
+        print(f"[ComputerUse] OCR fallback unavailable: {e}")
+
     return ""
 
 
@@ -242,6 +341,8 @@ RULES:
    - {{"action": "press", "key": "enter"}} — press a key (enter, tab, escape, backspace, etc.)
    - {{"action": "hotkey", "keys": ["ctrl", "a"]}} — press key combination
    - {{"action": "scroll", "direction": "down", "amount": 3}} — scroll
+   - {{"action": "drag", "x": 100, "y": 200, "to_x": 300, "to_y": 400}} — drag from one point to another
+   - {{"action": "select_text", "x": 500, "y": 300}} — click at position and select all text (Ctrl+A)
    - {{"action": "wait", "seconds": 2}} — wait for something to load
    - {{"action": "done", "summary": "what was accomplished"}} — task is finished
 
